@@ -12,3 +12,7 @@ All notable changes to this project are documented here.
 - Datenmodelle `WebhookEvent`/`WebhookEventData` (Envelope, bewusst lax
   validiert, `extra="allow"`) und `QueueMessage` inkl. `from_event()` für die
   Pass-Queue-Nachricht.
+- HMAC-SHA256-Signaturprüfung (`signing.sign`/`signing.verify`, Stripe-Stil,
+  `Heidi-Signature`-Header) gegen die rohen Body-Bytes — nicht gegen
+  re-serialisiertes JSON, damit erneut signierte Retries mit anderer
+  Key-Reihenfolge verifizierbar bleiben.
