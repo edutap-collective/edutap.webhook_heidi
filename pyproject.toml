@@ -75,6 +75,7 @@ asyncio_mode = "auto"
 parallel = true
 source = ["edutap.webhook_heidi"]
 relative_files = true
+omit = ["*/_version.py"]  # von hatch-vcs generiert, nicht versioniert
 
 [tool.coverage.report]
 show_missing = true
