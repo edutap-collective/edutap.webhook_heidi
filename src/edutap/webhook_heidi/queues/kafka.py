@@ -25,8 +25,13 @@ class KafkaQueueBackend:
         self._settings = settings or Settings()
         self._producer: AIOKafkaProducer | None = None
         self._consumer: AIOKafkaConsumer | None = None
-        self._records: dict[str, tuple[str, int, int]] = {}
+        self._records: dict[int, tuple[str, int, int]] = {}
         self.last_key: bytes | None = None
+        # Schützt gegen die Kaltstart-Race: mehrere gleichzeitige enqueue()/
+        # consume()-Aufrufe dürfen nicht je einen eigenen (verwaisten)
+        # Producer/Consumer erzeugen, siehe _get_producer()/_get_consumer().
+        self._producer_lock = asyncio.Lock()
+        self._consumer_lock = asyncio.Lock()
 
     def _auth(self) -> dict:
         password = self._settings.kafka_sasl_password
@@ -40,58 +45,90 @@ class KafkaQueueBackend:
         }
 
     async def _get_producer(self) -> AIOKafkaProducer:
+        # Double-checked locking: der erste (ungelockte) Check erspart das
+        # Lock im Steady-State (Producer schon da). Ohne das Lock gibt das
+        # `await producer.start()` weiter unten die Kontrolle ab -- mehrere
+        # gleichzeitige Aufrufer auf kaltem Backend laufen sonst alle durch
+        # den `is None`-Check, bevor irgendeiner zuweist, und erzeugen je
+        # einen eigenen, nie gestoppten Producer samt Broker-Verbindung.
         if self._producer is None:
-            producer = AIOKafkaProducer(
-                bootstrap_servers=self._settings.kafka_bootstrap_servers,
-                value_serializer=lambda value: json.dumps(value).encode(),
-                # Broker dedupliziert producer-seitige Retries; impliziert acks="all".
-                enable_idempotence=True,
-                acks="all",
-                **self._auth(),
-            )
-            try:
-                await producer.start()
-            except KafkaError as exc:
-                raise QueueUnavailable(str(exc)) from exc
-            self._producer = producer
+            async with self._producer_lock:
+                if self._producer is None:
+                    producer = AIOKafkaProducer(
+                        bootstrap_servers=self._settings.kafka_bootstrap_servers,
+                        value_serializer=lambda value: json.dumps(value).encode(),
+                        # Broker dedupliziert producer-seitige Retries; impliziert acks="all".
+                        enable_idempotence=True,
+                        acks="all",
+                        **self._auth(),
+                    )
+                    try:
+                        await producer.start()
+                    except KafkaError as exc:
+                        raise QueueUnavailable(f"{type(exc).__name__}: {exc}") from exc
+                    self._producer = producer
         return self._producer
 
     async def _get_consumer(self) -> AIOKafkaConsumer:
+        # Gleiche Race wie in _get_producer(), gleicher Fix.
         if self._consumer is None:
-            consumer = AIOKafkaConsumer(
-                self._settings.kafka_topic,
-                bootstrap_servers=self._settings.kafka_bootstrap_servers,
-                group_id=self._settings.kafka_consumer_group,
-                value_deserializer=lambda value: json.loads(value),
-                enable_auto_commit=False,
-                auto_offset_reset="earliest",
-                **self._auth(),
-            )
-            await consumer.start()
-            self._consumer = consumer
+            async with self._consumer_lock:
+                if self._consumer is None:
+                    consumer = AIOKafkaConsumer(
+                        self._settings.kafka_topic,
+                        bootstrap_servers=self._settings.kafka_bootstrap_servers,
+                        group_id=self._settings.kafka_consumer_group,
+                        value_deserializer=lambda value: json.loads(value),
+                        enable_auto_commit=False,
+                        auto_offset_reset="earliest",
+                        **self._auth(),
+                    )
+                    await consumer.start()
+                    self._consumer = consumer
         return self._consumer
 
-    async def enqueue(self, message: QueueMessage) -> None:
+    async def _enqueue_unbounded(self, message: QueueMessage, key: bytes) -> None:
+        # Producer-Start MIT im wait_for-Zeitfenster von enqueue(): sonst
+        # hängt ein Worker gegen einen Listener, der TCP annimmt, aber nicht
+        # antwortet, viel länger als enqueue_timeout (gemessen: 40s statt
+        # der konfigurierten 2s) -- der Sender-Timeout (30s) wäre da längst
+        # abgelaufen.
         producer = await self._get_producer()
+        await producer.send_and_wait(
+            self._settings.kafka_topic,
+            value=message.model_dump(mode="json"),
+            key=key,
+        )
+
+    async def enqueue(self, message: QueueMessage) -> None:
         key = message.passid.encode()
+        timeout = self._settings.enqueue_timeout
         try:
             await asyncio.wait_for(
-                producer.send_and_wait(
-                    self._settings.kafka_topic,
-                    value=message.model_dump(mode="json"),
-                    key=key,
-                ),
-                timeout=self._settings.enqueue_timeout,
+                self._enqueue_unbounded(message, key), timeout=timeout
             )
-        except (KafkaError, asyncio.TimeoutError) as exc:
-            raise QueueUnavailable(str(exc)) from exc
+        except asyncio.TimeoutError as exc:
+            # str(asyncio.TimeoutError()) ist leer -- QueueUnavailable(str(exc))
+            # wäre dann eine leere, nichtssagende Fehlermeldung.
+            raise QueueUnavailable(f"Enqueue-Timeout nach {timeout}s") from exc
+        except KafkaError as exc:
+            raise QueueUnavailable(f"{type(exc).__name__}: {exc}") from exc
         self.last_key = key
 
     async def consume(self) -> AsyncIterator[QueueMessage]:
         consumer = await self._get_consumer()
         async for record in consumer:
             message = QueueMessage.model_validate(record.value)
-            self._records[message.eventid] = (
+            # Bewusst NICHT nach eventid gekeyt: Duplikate sind by design
+            # erwartet (heidi.cloud liefert at-least-once, deshalb
+            # dedupliziert der Consumer und nicht wir). Zwei Nachrichten mit
+            # gleicher eventid an unterschiedlichen Offsets dürfen sich hier
+            # nicht überschreiben, sonst committet ack() der ersten Kopie den
+            # Offset der zweiten mit -> Nachrichten dazwischen gelten
+            # fälschlich als verarbeitet und werden nie wieder ausgeliefert.
+            # id(message) ist eindeutig, solange der Aufrufer die Nachricht
+            # bis zum ack() referenziert (siehe ack()-Docstring).
+            self._records[id(message)] = (
                 record.topic,
                 record.partition,
                 record.offset,
@@ -100,7 +137,19 @@ class KafkaQueueBackend:
             yield message
 
     async def ack(self, message: QueueMessage) -> None:
-        record = self._records.pop(message.eventid, None)
+        """Bestätigt genau DIESES Nachrichtenobjekt (Identität, nicht ``eventid``).
+
+        Kafka-Offset-Commits sind kumulativ: ``commit()`` setzt den
+        Consumer-Offset für die Partition auf einen Wert, es gibt kein
+        "commit nur diese eine Nachricht". Deshalb MUSS der Consumer
+        sequenziell arbeiten — konsumieren, verarbeiten, acken, danach erst
+        die nächste Nachricht holen. Wer mehrere Nachrichten aus
+        ``consume()`` stapelt und sie außer der Reihe (oder gar nicht alle)
+        ackt, committet dabei stillschweigend auch die übersprungenen
+        Offsets mit und verliert die dazwischenliegenden Nachrichten für
+        immer.
+        """
+        record = self._records.pop(id(message), None)
         if record is None or self._consumer is None:
             return
         topic, partition, offset = record

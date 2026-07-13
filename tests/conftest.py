@@ -86,6 +86,33 @@ async def _kafka_broker_available(bootstrap_servers: str, timeout: float = 2.5) 
             await asyncio.wait_for(producer.stop(), timeout=timeout)
 
 
+async def _wait_for_kafka_broker(
+    bootstrap_servers: str, retry_seconds: float = 30.0, interval: float = 2.0
+) -> bool:
+    """Pollt ``_kafka_broker_available`` bis zu ``retry_seconds`` lang.
+
+    MINOR 6: Der CI-Service-Container (``.github/workflows/tests.yaml``) hat
+    keinen Healthcheck, und der bisherige Probe war ein einmaliger
+    2,5-s-Versuch. Da der Test-Job ``EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1``
+    setzt, wurde ein Broker, der beim ersten Testlauf noch hochfährt, damit
+    zu einem harten CI-Fail statt zu einem sauberen Warten — Flake-Risiko.
+
+    Bewusst als eigene Funktion (statt den Timeout in
+    ``_kafka_broker_available`` selbst zu erhöhen): lokal, ohne einen
+    absichtlich laufenden Broker, soll ein Entwickler weiterhin nach ~2,5s
+    den Skip-Hinweis sehen, nicht 30s auf einen Broker warten, der nie
+    kommt. Aufgerufen wird diese Funktion deshalb nur im
+    ``TEST_REQUIRE_KAFKA``-Pfad, siehe ``kafka_settings``.
+    """
+    deadline = asyncio.get_event_loop().time() + retry_seconds
+    while True:
+        if await _kafka_broker_available(bootstrap_servers):
+            return True
+        if asyncio.get_event_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(interval)
+
+
 @pytest.fixture
 async def kafka_settings() -> Settings:
     """Settings gegen einen echten Kafka-Broker.
@@ -104,15 +131,21 @@ async def kafka_settings() -> Settings:
     - in der CI (``EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1``): Test schlägt
       hart fehl (``pytest.fail``), statt still grün zu bleiben — sonst wäre
       das einzige produktive Queue-Backend in der Pipeline nie getestet.
+      Da der CI-Service-Container keinen eigenen Healthcheck hat, wird hier
+      bis zu 30s in 2-s-Schritten erneut geprobt (``_wait_for_kafka_broker``),
+      statt beim ersten von einem noch startenden Broker verpassten Versuch
+      sofort hart zu scheitern (Flake-Risiko).
     """
     bootstrap_servers = _kafka_bootstrap_servers()
-    if not await _kafka_broker_available(bootstrap_servers):
+    required = _kafka_required()
+    probe = _wait_for_kafka_broker if required else _kafka_broker_available
+    if not await probe(bootstrap_servers):
         message = (
             f"Kein Kafka-Broker unter {bootstrap_servers} erreichbar. Lokal "
             "z.B. `docker run -d -p 19092:19092 ... apache/kafka:latest` "
             f"starten und {KAFKA_BOOTSTRAP_ENV}=localhost:19092 setzen."
         )
-        if _kafka_required():
+        if required:
             pytest.fail(message)
         pytest.skip(message)
     return Settings(

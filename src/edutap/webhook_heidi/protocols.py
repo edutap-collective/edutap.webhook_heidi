@@ -32,7 +32,16 @@ class QueueBackend(Protocol):
         ...
 
     async def ack(self, message: QueueMessage) -> None:
-        """Bestätigt die Verarbeitung (Kafka: Offset-Commit)."""
+        """Bestätigt genau die übergebene Nachricht (Kafka: Offset-Commit).
+
+        Kafka-Offset-Commits sind kumulativ (es gibt kein "committe nur
+        diese eine Nachricht"), deshalb MUSS ein Consumer sequenziell
+        arbeiten: konsumieren -> verarbeiten -> acken, erst danach die
+        nächste Nachricht aus ``consume()`` holen. Wer Nachrichten stapelt
+        und außerhalb dieser Reihenfolge (oder unvollständig) ackt,
+        überspringt dabei stillschweigend die dazwischenliegenden
+        Nachrichten — sie gelten als verarbeitet, obwohl sie es nie waren.
+        """
         ...
 
     async def stop(self) -> None:

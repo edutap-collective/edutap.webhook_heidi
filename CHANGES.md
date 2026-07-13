@@ -136,3 +136,55 @@ All notable changes to this project are documented here.
   damit ein Modellfehler dort nicht fälschlich als 503 statt als eigener Bug
   erscheint. Import-Zeit-Backend-Resolve loggt jetzt eine `warning`, wenn
   beim Import kein Backend auflösbar ist, statt es still zu schlucken.
+- `queues/kafka.py`: Fünf Review-Befunde behoben (alle empirisch belegt,
+  jeweils erst per rot werdendem Test reproduziert):
+  - **Coverage-Theater um die Kernzusage**: Die Fake-Producer/-Consumer in
+    `tests/test_queues_kafka_unit.py` schluckten bislang die
+    Konstruktor-kwargs, ohne sie zu prüfen — eine Mutation, die
+    `enable_idempotence`/`acks="all"`/`enable_auto_commit` entfernt bzw.
+    umdreht, blieb bei 100 % Coverage grün. Neue Tests
+    (`test_get_producer_is_idempotent_with_acks_all`,
+    `test_get_consumer_uses_manual_commit_and_group_id`) assertieren jetzt
+    genau diese Werte; verifiziert, indem die Werte testweise verdreht und
+    die Suite dabei rot wurde.
+  - **Stiller Datenverlust bei doppelten `eventid`s**: `_records` war nach
+    `message.eventid` gekeyt, obwohl Duplikate by design erwartet sind
+    (heidi.cloud liefert at-least-once, deshalb dedupliziert der Consumer
+    und nicht wir). Zwei Nachrichten mit derselben `eventid` an
+    unterschiedlichen Offsets überschrieben sich gegenseitig; `ack()` der
+    ersten Kopie committete dadurch den Offset der zweiten mit und ließ
+    dazwischenliegende Nachrichten für immer unverarbeitet. Reproduziert
+    am echten Broker (Offsets 0/3 mit gleicher `eventid`, 1/2 dazwischen
+    verloren) und als Unit-Test nachgebildet
+    (`test_ack_commits_only_up_to_its_own_offset_with_duplicate_eventids`).
+    Fix: `_records` ist jetzt nach `id(message)` gekeyt, nicht mehr nach
+    `eventid`. `QueueBackend.ack()` (`protocols.py`) dokumentiert jetzt
+    explizit, dass Kafka-Commits kumulativ sind und Consumer deshalb
+    sequenziell arbeiten müssen (konsumieren → verarbeiten → acken, erst
+    dann die nächste Nachricht holen).
+  - **Race beim Kaltstart**: `_get_producer()`/`_get_consumer()` prüften
+    `if self._producer is None`, gaben dann per `await ...start()` die
+    Kontrolle ab und wiesen erst danach zu — mehrere gleichzeitige
+    `enqueue()`-Aufrufe auf kaltem Backend erzeugten dadurch je einen
+    eigenen, nie gestoppten Producer (gemessen: 5 gleichzeitige Aufrufe →
+    5 Producer, 4 verwaist). Fix: `asyncio.Lock` je Getter mit
+    Double-Checked-Locking.
+  - **`enqueue_timeout` deckte den Producer-Start nicht ab**: `wait_for`
+    umschloss nur `send_and_wait`, `_get_producer()` lief ungebremst davor
+    — gegen einen Listener, der TCP annimmt, aber nicht antwortet, wurde
+    `QueueUnavailable` erst nach 40 s statt der konfigurierten 2 s
+    geworfen. Fix: Producer-Start und Send laufen jetzt gemeinsam in einem
+    `wait_for`.
+  - **Leere Fehlermeldung bei Timeout**: `str(asyncio.TimeoutError())` ist
+    `""`, `QueueUnavailable(str(exc))` war dadurch inhaltslos. Wirft jetzt
+    `f"Enqueue-Timeout nach {timeout}s"` (bzw. bei `KafkaError` den
+    Exception-Klassennamen mit Meldung), jeweils mit `from exc`.
+- `tests/conftest.py`: Der Kafka-Broker-Probe war ein einmaliger 2,5-s-
+  Versuch ohne Retry; der CI-Service-Container in
+  `.github/workflows/tests.yaml` hat keinen eigenen Healthcheck. Mit
+  `EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1` konnte ein Broker, der beim
+  ersten Testlauf noch hochfährt, dadurch einen harten, flakigen CI-Fail
+  auslösen. Neu: `_wait_for_kafka_broker()` pollt bis zu 30 s in 2-s-
+  Schritten, aber nur im `TEST_REQUIRE_KAFKA`-Pfad — lokal ohne
+  absichtlich laufenden Broker bleibt der schnelle Einzelversuch, damit
+  der Skip-Hinweis nicht künstlich verzögert wird.
