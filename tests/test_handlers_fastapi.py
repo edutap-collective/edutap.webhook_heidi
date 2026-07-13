@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from plugins import ExplodingQueueBackend
 from plugins import FailingQueueBackend
 
+import httpx
 import json
 import logging
 import pytest
@@ -264,6 +265,50 @@ def test_oversized_body_without_content_length_is_rejected_with_413(
     assert memory_backend.messages == []
 
 
+async def test_oversized_chunked_body_is_rejected_without_full_buffering(
+    memory_backend, monkeypatch
+):
+    """Ohne ``Content-Length`` (Chunked Transfer Encoding, z.B. weil ein
+    Angreifer den Header schlicht weglässt) darf der Body NICHT vollständig
+    gepuffert werden, bevor die Größenprüfung greift — sonst Memory-DoS trotz
+    konfiguriertem Limit. Der Endpoint muss stattdessen inkrementell lesen und
+    abbrechen, sobald das Limit überschritten ist.
+
+    ``fastapi.testclient.TestClient`` liest Generator-Bodies vor dem Senden
+    komplett in den Speicher (``httpx.Request.read()``) und sendet dann exakte
+    Bytes — das verschleiert genau das Verhalten, das hier geprüft werden
+    soll. Deshalb ein roher ``httpx.AsyncClient`` mit ``ASGITransport`` und
+    einem async Generator als Body, der wirklich chunked (ohne
+    Content-Length) und lazy an die ASGI-App gereicht wird.
+    """
+    from edutap.webhook_heidi.handlers import fastapi as fastapi_module
+
+    monkeypatch.setattr(fastapi_module.settings, "max_body_bytes", 1024)
+
+    chunk = b"a" * 4096
+    total_chunks = 25  # 100 KB gesamt, weit über dem 1-KiB-Testlimit
+    consumed = {"n": 0}
+
+    async def body_stream():
+        for _ in range(total_chunks):
+            consumed["n"] += 1
+            yield chunk
+
+    app = FastAPI()
+    app.include_router(fastapi_module.router)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post(PATH, content=body_stream())
+
+    assert response.status_code == 413
+    # Der eigentliche Kern des Tests: nicht alle 25 Chunks (100 KB) dürfen
+    # gelesen worden sein, bevor abgebrochen wurde — mit einem 1-KiB-Limit
+    # genügen wenige Chunks, um die Grenze zu überschreiten.
+    assert consumed["n"] < total_chunks
+    assert memory_backend.messages == []
+
+
 def test_unknown_reason_is_accepted(client, memory_backend):
     """Unbekannte ``reason``-Werte dürfen NICHT abgelehnt werden — sonst 48 h
     Retry-Sturm, exakt wie beim unbekannten ``type``."""
@@ -344,6 +389,35 @@ def test_malformed_envelope_logs_info_with_reason(client, memory_backend, caplog
     ]
     assert len(records) == 1
     assert records[0].levelno == logging.INFO
+
+
+def test_malformed_envelope_400_log_does_not_leak_pii(client, memory_backend, caplog):
+    """Der 400-Log darf nur Struktur (Fehlerorte), niemals Feldwerte enthalten
+    — sonst landet z.B. die Matrikelnummer (``person_id`` bei LMU) auf
+    INFO-Level im Log. pydantic v2 bettet Werte in ``str(ValidationError)``
+    und in jedem einzelnen ``exc.errors()``-Eintrag (Key ``input``) ein, daher
+    darf weder das eine noch das andere ungefiltert geloggt werden."""
+    body = json.dumps(
+        {
+            **EVENT,
+            "data": {
+                # pass_id fehlt bewusst -> ValidationError mit eingebettetem
+                # input_value, der die Matrikelnummer enthält.
+                "person_id": "MATRIKELNUMMER-12345",
+            },
+        }
+    ).encode()
+
+    with caplog.at_level(logging.INFO, logger="edutap.webhook_heidi.handlers.fastapi"):
+        response = _post(client, body)
+
+    assert response.status_code == 400
+    records = [
+        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
+    ]
+    assert len(records) == 1
+    logged = records[0].getMessage()
+    assert "MATRIKELNUMMER-12345" not in logged
 
 
 def test_oversized_body_logs_warning_with_size(client, memory_backend, caplog):

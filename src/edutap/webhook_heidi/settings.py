@@ -29,9 +29,16 @@ class Settings(BaseSettings):
 
     max_body_bytes: int = 1_048_576
     """Obergrenze für den rohen Request-Body (1 MiB). Echte Pass-Events sind
-    wenige KB groß; der Endpoint prüft diese Grenze VOR dem Lesen/Puffern des
-    Bodys (wo möglich, per ``Content-Length``), damit ein unauthentifizierter
-    Absender nicht beliebig viel Speicher belegen kann (Memory-DoS)."""
+    wenige KB groß; der Endpoint prüft diese Grenze VOR jedem vollständigen
+    Puffern des Bodys — wo möglich billig per ``Content-Length``, sonst
+    inkrementell beim Streamen —, damit ein unauthentifizierter Absender
+    nicht beliebig viel Speicher belegen kann (Memory-DoS).
+
+    Vorsicht bei kleineren Werten als dem Default: heidi.cloud wiederholt
+    JEDES Non-2xx (auch 413) bis zu 12x über 48 h. Ist das Limit zu knapp
+    gewählt, laufen dadurch legitime, nur etwas größere Events innerhalb
+    dieses Fensters endgültig ins Leere und sind danach unwiederbringlich
+    verloren. Der Default ist deshalb bewusst großzügig bemessen."""
 
     # Enqueue — muss deutlich unter dem 30-s-Timeout des Senders bleiben
     enqueue_timeout: float = 10.0

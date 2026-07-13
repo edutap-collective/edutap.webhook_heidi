@@ -21,7 +21,6 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import Response
 
-import contextlib
 import logging
 import pydantic
 import time
@@ -40,13 +39,45 @@ settings = Settings()
 # hier unaufgelöstes Backend darf den Import deshalb NICHT sprengen. Bleibt
 # es auch beim ersten echten Request unauflösbar, fängt der Enqueue-Pfad das
 # unten ab (503, nicht 500).
-with contextlib.suppress(NotImplementedError, ValueError):
+try:
     get_queue_backend()
+except (NotImplementedError, ValueError):
+    logger.warning(
+        "Kein Queue-Backend beim Import auflösbar — wird beim ersten Request "
+        "erneut versucht; bleibt es dann weiterhin unauflösbar, antwortet der "
+        "Endpoint mit 503 statt zu enqueuen."
+    )
 
 router = APIRouter(
     prefix=settings.handler_prefix,
     tags=["edutap.webhook_heidi"],
 )
+
+
+async def _read_body_limited(request: Request, limit: int) -> bytes:
+    """Liest den Request-Body inkrementell über ``request.stream()`` und
+    bricht ab, sobald ``limit`` überschritten wird.
+
+    Der ``Content-Length``-Vorcheck im Aufrufer greift nur, wenn der Header
+    gesetzt und korrekt ist — ein Angreifer kann ihn (z.B. via Chunked
+    Transfer Encoding) einfach weglassen. Ohne inkrementelles Lesen würde
+    ``await request.body()`` den kompletten Body erst unbegrenzt puffern und
+    die Größenprüfung käme zu spät (Memory-DoS). Deshalb hier chunkweise
+    lesen und bei Überschreitung SOFORT abbrechen, statt weiterzupuffern.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            logger.warning(
+                "Payload zu groß (mindestens %s Bytes gelesen, Limit=%s Bytes).",
+                size,
+                limit,
+            )
+            raise HTTPException(status_code=413, detail="Payload too large.")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @router.post(
@@ -93,17 +124,11 @@ async def handle_pass_event(request: Request) -> Response:
             raise HTTPException(status_code=413, detail="Payload too large.")
 
     # Raw Bytes, VOR jedem Parsen: Retries tragen dieselbe Nachricht mit anderen
-    # Bytes (JSONB-Roundtrip), pro Versuch neu signiert.
-    body = await request.body()
-
-    # Fehlt Content-Length oder war er falsch: nachträglich prüfen.
-    if len(body) > settings.max_body_bytes:
-        logger.warning(
-            "Payload zu groß (%s Bytes, Limit=%s Bytes).",
-            len(body),
-            settings.max_body_bytes,
-        )
-        raise HTTPException(status_code=413, detail="Payload too large.")
+    # Bytes (JSONB-Roundtrip), pro Versuch neu signiert. Inkrementell lesen
+    # (nicht ``request.body()``) — fehlt Content-Length (Chunked Transfer
+    # Encoding), ist das die eigentliche Absicherung gegen Memory-DoS, nicht
+    # nur ein Nachtrag.
+    body = await _read_body_limited(request, settings.max_body_bytes)
 
     if not verify(
         settings.webhook_secret.get_secret_value(),
@@ -124,7 +149,17 @@ async def handle_pass_event(request: Request) -> Response:
     try:
         event = WebhookEvent.model_validate_json(body)
     except pydantic.ValidationError as exc:
-        logger.info("Envelope-Validierung fehlgeschlagen: %s", exc)
+        # NIEMALS str(exc) oder exc.errors() (im Ganzen) loggen: pydantic v2
+        # bettet in beiden den validierten Eingabewert ein (``input_value``
+        # bzw. Key ``input``) — bei LMU z.B. die Matrikelnummer in
+        # ``person_id``. Deshalb gezielt nur die strukturelle Fehlerort
+        # herausziehen, nie den Wert.
+        error_locations = [e["loc"] for e in exc.errors()]
+        logger.info(
+            "Envelope-Validierung fehlgeschlagen (%s Fehler, Orte=%s).",
+            exc.error_count(),
+            error_locations,
+        )
         raise HTTPException(
             status_code=400, detail="Malformed event envelope."
         ) from exc
@@ -132,8 +167,13 @@ async def handle_pass_event(request: Request) -> Response:
     if event.type == WEBHOOK_TEST:
         return Response(status_code=200)
 
+    # Bewusst VOR dem try-Block: ein Modellfehler hier wäre ein eigener Bug
+    # (nicht ein Backend-/Infrastrukturproblem) und soll deshalb nicht vom
+    # breiten except unten fälschlich als 503 maskiert werden.
+    message = QueueMessage.from_event(event)
+
     try:
-        await get_queue_backend().enqueue(QueueMessage.from_event(event))
+        await get_queue_backend().enqueue(message)
     except Exception as exc:
         # Absichtlich breit: sowohl der erwartete Fall (QueueUnavailable, kein
         # Backend registriert -> NotImplementedError/ValueError) als auch
@@ -141,8 +181,10 @@ async def handle_pass_event(request: Request) -> Response:
         # werden zu 503, nicht 500. Ein 503 sagt dem Sender "später nochmal";
         # ein 500 täte dasselbe (Non-2xx -> Retry), sähe aber wie unser Bug
         # aus statt wie ein Infrastrukturproblem und würde unnötig Stacktraces
-        # und Alerts erzeugen.
-        logger.error("Enqueue fehlgeschlagen (event.id=%s): %s", event.id, exc)
+        # und Alerts erzeugen. logger.exception() (statt .error()), damit der
+        # Traceback trotzdem erhalten bleibt — sonst maskieren wir eigene Bugs
+        # spurlos.
+        logger.exception("Enqueue fehlgeschlagen (event.id=%s).", event.id)
         raise HTTPException(status_code=503, detail="Queue unavailable.") from exc
 
     logger.debug("Event enqueued (event.id=%s).", event.id)

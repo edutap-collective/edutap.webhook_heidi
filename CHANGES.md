@@ -69,3 +69,21 @@ All notable changes to this project are documented here.
   `settings.max_body_bytes`, bevor der Body gelesen wird (413 ohne zu
   lesen); fehlt der Header oder ist er falsch, wird die Länge nach dem Lesen
   geprüft (413 bei Überschreitung).
+- `handlers/fastapi.py`: Der `Content-Length`-Vorcheck greift nicht, wenn der
+  Header fehlt (z.B. Chunked Transfer Encoding ohne den Header) — `await
+  request.body()` puffert dann trotzdem unbegrenzt, bevor die
+  Größenprüfung zum Zug kommt. Der Body wird jetzt über eine neue
+  `_read_body_limited()` inkrementell per `request.stream()` gelesen und
+  bricht sofort mit 413 ab, sobald `max_body_bytes` überschritten ist, statt
+  den Rest noch zu puffern.
+- `handlers/fastapi.py`: Der 400-Log beim Envelope-Parsen loggte `str(exc)`
+  einer pydantic-`ValidationError` — die bettet den validierten Eingabewert
+  ein (z.B. die Matrikelnummer in `person_id` bei LMU), landete also
+  ungewollt auf INFO-Level im Log. Geloggt werden jetzt nur noch
+  `exc.error_count()` und die Fehlerorte (`e["loc"]` je Fehler), nie ein Wert.
+- `handlers/fastapi.py`: `logger.error(...)` im generischen Enqueue-Fehlerfall
+  durch `logger.exception(...)` ersetzt, damit der Traceback erhalten bleibt.
+  `QueueMessage.from_event(event)` aus dem `try`-Block vor den `try` gezogen,
+  damit ein Modellfehler dort nicht fälschlich als 503 statt als eigener Bug
+  erscheint. Import-Zeit-Backend-Resolve loggt jetzt eine `warning`, wenn
+  beim Import kein Backend auflösbar ist, statt es still zu schlucken.
