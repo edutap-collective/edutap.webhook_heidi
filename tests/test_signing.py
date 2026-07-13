@@ -2,6 +2,8 @@ from edutap.webhook_heidi.signing import sign
 from edutap.webhook_heidi.signing import SIGNATURE_HEADER
 from edutap.webhook_heidi.signing import verify
 
+import hashlib
+import hmac
 import json
 
 
@@ -59,12 +61,28 @@ def test_malformed_headers():
         "v1=x,t=1",
         f"t={NOW}",
         f"t={NOW};v1=x",
+        "t=1752422820,v1=Ã",
+        "t=Ã,v1=x",
+        f"t={NOW},v1=xyz",
+        f"t=+{NOW},v1=" + "0" * 64,
     ):
         assert verify(SECRET, header, BODY, now=NOW) is False
 
 
+def test_sign_matches_sender_construction():
+    """Known-answer-Vektor — pinnt f"{ts}." + raw body, sha256, hex."""
+    expected = hmac.new(
+        SECRET.encode(), b"1752422820." + BODY, hashlib.sha256
+    ).hexdigest()
+    assert sign(SECRET, NOW, BODY) == f"t={NOW},v1={expected}"
+
+
+def test_empty_secret_rejected():
+    assert verify("", sign("", NOW, BODY), BODY, now=NOW) is False
+
+
 def test_retry_bytes_verify_independently():
-    """DER Fall, der eine naive Implementierung bricht.
+    """verify() ist byte-sensitiv: Retries mit abweichenden Bytes verifizieren eigenständig.
 
     heidi.cloud sendet Retries aus einem JSONB-Roundtrip: gleiche Nachricht,
     andere Bytes (normalisierte Key-Reihenfolge, kompakte Separatoren), pro

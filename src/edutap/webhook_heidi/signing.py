@@ -29,9 +29,13 @@ def verify(
     tolerance_seconds: int = 300,
 ) -> bool:
     """Prüft den ``Heidi-Signature``-Header gegen die Raw Bytes des Bodys."""
+    if not secret:
+        return False
     try:
         t_part, v1_part = header_value.split(",", 1)
         if not t_part.startswith("t=") or not v1_part.startswith("v1="):
+            return False
+        if not t_part[2:].isdigit():
             return False
         timestamp = int(t_part[2:])
         signature = v1_part[3:]
@@ -39,5 +43,11 @@ def verify(
         return False
     if abs(now - timestamp) > tolerance_seconds:
         return False
-    expected = sign(secret, timestamp, body)
-    return hmac.compare_digest(expected, f"t={timestamp},v1={signature}")
+    expected = hmac.new(
+        secret.encode(), f"{timestamp}.".encode() + body, hashlib.sha256
+    ).digest()
+    try:
+        provided = bytes.fromhex(signature)
+    except ValueError:
+        return False
+    return hmac.compare_digest(expected, provided)
