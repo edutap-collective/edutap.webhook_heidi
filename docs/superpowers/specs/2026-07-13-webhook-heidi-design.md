@@ -244,21 +244,52 @@ Fehler.
 
 ### 3.3 Settings
 
+**Die gesamte Konfiguration läuft über `pydantic-settings`** — es gibt keine
+zweite Config-Quelle: keine YAML-Datei, kein Config-Objekt im Code, keine
+`os.environ`-Zugriffe verstreut über die Module. Jeder konfigurierbare Wert ist
+ein Feld auf `Settings` und damit per Env-Var (Prefix
+`EDUTAP_WEBHOOK_HEIDI_…`) oder `.env` setzbar. Das entspricht auch der
+Hauskonvention von `edutap.wallet_google` / `wallet_apple`.
+
 ```python
 ENV_PREFIX = "EDUTAP_WEBHOOK_HEIDI_"
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix=ENV_PREFIX, env_file=".env", ...)
+    model_config = SettingsConfigDict(
+        env_prefix=ENV_PREFIX,
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
+    # HTTP-Endpoint
     handler_prefix: str = "/webhook/heidi"
-    webhook_secret: SecretStr                 # aus der heidi.cloud-Admin-UI
-    signature_tolerance_seconds: int = 300
-    enqueue_timeout: float = 10.0             # << 30 s Sender-Timeout
 
-    # Kafka-Backend
+    # Signaturprüfung (Sender-Vertrag, §2.2)
+    webhook_secret: SecretStr                    # aus der heidi.cloud-Admin-UI
+    signature_tolerance_seconds: int = 300
+
+    # Enqueue — muss deutlich unter dem 30-s-Timeout des Senders bleiben
+    enqueue_timeout: float = 10.0
+
+    # Kafka-Backend (Extra [kafka])
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_topic: str = "heidi.pass-events"
+    kafka_consumer_group: str = "heidi-pass-spooler"
+    kafka_security_protocol: str = "PLAINTEXT"   # im LRZ vermutlich SASL_SSL
+    kafka_sasl_mechanism: str | None = None
+    kafka_sasl_username: str | None = None
+    kafka_sasl_password: SecretStr | None = None
 ```
+
+Secrets sind durchgängig `SecretStr`, damit sie nicht versehentlich in Logs oder
+Tracebacks landen. `webhook_secret` hat **keinen Default** — fehlt die Env-Var,
+schlägt der Start fehl, statt still mit einem unsicheren Wert zu laufen.
+
+Zugriff wie bei den Geschwister-Paketen: `Settings()` wird dort instanziiert, wo
+es gebraucht wird (kein globaler Singleton), damit Tests per Fixture überschreiben
+können.
 
 ## 4. Queue-Message
 
