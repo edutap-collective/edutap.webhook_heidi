@@ -19,6 +19,9 @@ _backend: QueueBackend | None = None
 
 def add_plugin(klass: type) -> None:
     """Registriert ein Backend programmatisch (für Tests und Einbettung)."""
+    # Hinweis: issubclass() gegen ein runtime_checkable Protocol prüft nur die Existenz
+    # der Methodennamen — nicht ihre Signatur, Arity oder async-Eigenschaft. Ein Backend
+    # mit synchronem enqueue() besteht diese Prüfung und scheitert erst zur Laufzeit.
     if not issubclass(klass, QueueBackend):
         raise TypeError(f"{klass!r} implementiert QueueBackend nicht.")
     _registry.append(klass)
