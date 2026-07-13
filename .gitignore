@@ -1,0 +1,33 @@
+# hatch-vcs generated version file — git tag is the source of truth
+src/edutap/webhook_heidi/_version.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# uv
+uv.lock

@@ -1,0 +1,120 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "edutap.webhook-heidi"
+dynamic = ["version"]
+description = "Webhook endpoint and swappable pass-event queue for the eduTAP/HEIDI system"
+keywords = ["wallet", "heidi", "webhook", "queue", "pass", "fastapi", "digital identity"]
+readme = "README.md"
+authors = [
+    {name = "Alexander Loechel", email = "Alexander.Loechel@lmu.de"},
+    {name = "Philipp Auersperg-Castell", email = "phil@bluedynamics.com"},
+    {name = "Jens Klein", email = "jk@kleinundpartner.at"},
+    {name = "Robert Niederreiter", email = "rnix@squarewave.at"},
+]
+requires-python = ">=3.10"
+license = { text = "EUPL 1.2" }
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: European Union Public Licence 1.2 (EUPL 1.2)",
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "fastapi",
+    "pydantic>=2.0",
+    "pydantic-settings",
+]
+
+[project.urls]
+Source = "https://github.com/edutap-eu/edutap.webhook_heidi"
+Issues = "https://github.com/edutap-eu/edutap.webhook_heidi/issues"
+Documentation = "https://docs.edutap.eu/packages/edutap_webhook_heidi/index.html"
+
+[project.optional-dependencies]
+# Queue backends — reference implementations, common data format still TBD.
+# See docs/HANDOFF.md.
+postgres = ["psycopg[binary,pool]>=3.1"]
+kafka = ["aiokafka>=0.10"]
+redis = ["redis>=5.0"]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "coverage[toml]>=7.0",
+    "httpx",
+]
+develop = [
+    "pdbp>=1.7.1",
+]
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { local_scheme = "no-local-version" }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/edutap/webhook_heidi/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edutap"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+parallel = true
+source = ["edutap.webhook_heidi"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "B",
+    "C4",
+    "E",
+    "F",
+    "I",
+    "RUF",
+    "SIM",
+    "T20",
+    "UP",
+    "W",
+]
+ignore = [
+    "E501",
+    "RUF001",
+    "RUF002",
+]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+from-first = true
+lines-after-imports = 2
+lines-between-types = 1
+no-sections = true
+order-by-type = false
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["T201"]
