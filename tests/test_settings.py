@@ -29,6 +29,7 @@ def test_defaults(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.handler_prefix == "/webhook/heidi"
     assert settings.signature_tolerance_seconds == 300
+    assert settings.max_body_bytes == 1_048_576
     assert settings.enqueue_timeout == 10.0
     assert settings.kafka_topic == "heidi.pass-events"
     assert settings.kafka_consumer_group == "heidi-pass-spooler"

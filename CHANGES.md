@@ -6,8 +6,6 @@ All notable changes to this project are documented here.
 
 ### Features
 
-- Initial project scaffold: CI/CD, packaging, pre-commit, and handoff
-  documentation. No functional code yet — see [docs/HANDOFF.md](docs/HANDOFF.md).
 - Settings (pydantic-settings) für Webhook-Secret, Signatur-Toleranz und Kafka.
 - Datenmodelle `WebhookEvent`/`WebhookEventData` (Envelope, bewusst lax
   validiert, `extra="allow"`) und `QueueMessage` inkl. `from_event()` für die
@@ -35,6 +33,15 @@ All notable changes to this project are documented here.
   nicht enqueued), 401 nur bei ungültiger/fehlender Signatur, 400 nur wenn
   strukturell kein Envelope vorliegt, 503 wenn die Queue nicht erreichbar
   ist. Unbekannte `type`-Werte werden durchgereicht und enden mit 204.
+- `Settings.max_body_bytes` (Default 1 MiB): Obergrenze für den rohen
+  Request-Body, geprüft bevor er gepuffert wird.
+- Logging im Webhook-Endpoint (`logging.getLogger(__name__)` in
+  `handlers/fastapi.py`): 401 als `warning` (ohne Body/Signaturwert, mit
+  Hinweis auf mögliche Secret-Rotation), 400 als `info` mit dem Grund, 413
+  als `warning` mit der Größe, 503 als `error` mit `event.id`, erfolgreicher
+  Enqueue als `debug` mit `event.id`.
+- OpenAPI-Dokumentation der Statuscodes (`responses={...}` an
+  `@router.post`) für 200/204/400/401/413/503.
 
 ### Fixes
 
@@ -46,3 +53,19 @@ All notable changes to this project are documented here.
   Header-Strings; ungültiges Hex ergibt `False`. Zusätzlich: leeres
   Secret wird abgelehnt, und der Zeitstempel muss ein reiner
   Ziffernstring sein (kein `+`-Präfix, keine `_`-Trenner).
+- `handlers/fastapi.py`: Zwei Wege führten zuvor zu einem 500 statt 503 —
+  kein Backend registriert (`get_queue_backend()` wirft `NotImplementedError`)
+  und ein Backend, das etwas anderes als `QueueUnavailable` wirft (z.B.
+  `ConnectionResetError`, `asyncio.TimeoutError`). Der Enqueue-Pfad fängt
+  jetzt `Exception` breit ab und antwortet immer mit 503 — ein 500 wäre für
+  heidi.cloud identisch zu einem 503 (beides Non-2xx, beides löst bis zu 12h
+  Retries über 48 h aus), erzeugt aber unnötig Stacktraces/Alerts. Zusätzlich
+  wird das Backend beim Modul-Import versuchsweise aufgelöst (Fail-Fast in
+  der Produktion, wo der Entry-Point statisch vorhanden ist), ohne den
+  Import zu sprengen, falls es dort noch fehlt.
+- `handlers/fastapi.py`: `await request.body()` puffert den kompletten Body
+  im Speicher, bevor irgendetwas geprüft ist — ein unauthentifizierter
+  Memory-DoS. Der Endpoint prüft jetzt `Content-Length` gegen
+  `settings.max_body_bytes`, bevor der Body gelesen wird (413 ohne zu
+  lesen); fehlt der Header oder ist er falsch, wird die Länge nach dem Lesen
+  geprüft (413 bei Überschreitung).

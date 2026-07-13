@@ -10,3 +10,12 @@ class FailingQueueBackend(InMemoryQueueBackend):
 
     async def enqueue(self, message: QueueMessage) -> None:
         raise QueueUnavailable("Broker nicht erreichbar")
+
+
+class ExplodingQueueBackend(InMemoryQueueBackend):
+    """Simuliert einen unerwarteten Fehler, der NICHT QueueUnavailable ist
+    (z.B. ConnectionResetError, asyncio.TimeoutError) -> muss trotzdem 503
+    liefern, nicht 500."""
+
+    async def enqueue(self, message: QueueMessage) -> None:
+        raise RuntimeError("etwas Unerwartetes ist explodiert")

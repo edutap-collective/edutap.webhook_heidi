@@ -1,13 +1,16 @@
 from conftest import TEST_SECRET
 from edutap.webhook_heidi.plugins import add_plugin
+from edutap.webhook_heidi.plugins import get_queue_backend
 from edutap.webhook_heidi.plugins import reset_queue_backend
 from edutap.webhook_heidi.signing import sign
 from edutap.webhook_heidi.signing import SIGNATURE_HEADER
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from plugins import ExplodingQueueBackend
 from plugins import FailingQueueBackend
 
 import json
+import logging
 import pytest
 import time
 
@@ -37,6 +40,38 @@ def client() -> TestClient:
     app = FastAPI()
     app.include_router(router)
     return TestClient(app)
+
+
+@pytest.fixture
+def failing_queue_backend() -> FailingQueueBackend:
+    """Hängt ein Backend ein, das ``QueueUnavailable`` wirft, und räumt danach
+    auf — auch wenn ein Assert vorher fehlschlägt (sonst leckt das Backend in
+    alle folgenden Tests)."""
+    reset_queue_backend()
+    add_plugin(FailingQueueBackend)
+    backend = get_queue_backend()
+    yield backend
+    reset_queue_backend()
+
+
+@pytest.fixture
+def exploding_queue_backend() -> ExplodingQueueBackend:
+    """Backend, das einen unerwarteten Fehler wirft (kein ``QueueUnavailable``,
+    z.B. wie ``ConnectionResetError``/``asyncio.TimeoutError`` es wären)."""
+    reset_queue_backend()
+    add_plugin(ExplodingQueueBackend)
+    backend = get_queue_backend()
+    yield backend
+    reset_queue_backend()
+
+
+@pytest.fixture
+def no_queue_backend() -> None:
+    """Stellt sicher, dass kein Backend registriert ist (weder Entry-Point
+    noch programmatisch), und räumt danach auf."""
+    reset_queue_backend()
+    yield
+    reset_queue_backend()
 
 
 def _post(
@@ -152,11 +187,205 @@ def test_webhook_test_is_accepted_but_not_enqueued(client, memory_backend):
     assert memory_backend.messages == []
 
 
-def test_queue_unavailable_yields_503(client):
+def test_queue_unavailable_yields_503(client, failing_queue_backend):
     """Kein 2xx bei kaputter Queue — sonst ist das Event endgültig verloren."""
-    reset_queue_backend()
-    add_plugin(FailingQueueBackend)
-
     assert _post(client, json.dumps(EVENT).encode()).status_code == 503
 
-    reset_queue_backend()
+
+def test_no_backend_registered_yields_503_not_500(client, no_queue_backend):
+    """Fehlender/fehlkonfigurierter Entry-Point (z.B. Tippfehler im Namen) darf
+    keinen 500 erzeugen — der Sender bekommt sonst einen Retry-Sturm plus wir
+    einen Stacktrace statt eines klaren Infrastruktur-Signals."""
+    response = _post(client, json.dumps(EVENT).encode())
+    assert response.status_code == 503
+
+
+def test_unexpected_backend_error_yields_503_not_500(client, exploding_queue_backend):
+    """Ein Backend, das etwas anderes als QueueUnavailable wirft, muss
+    trotzdem 503 liefern, nicht 500."""
+    response = _post(client, json.dumps(EVENT).encode())
+    assert response.status_code == 503
+    assert exploding_queue_backend.messages == []
+
+
+def test_oversized_body_is_rejected_with_413(client, memory_backend):
+    """Beliebig große, unauthentifizierte Bodies dürfen nicht gepuffert
+    werden — Memory-DoS."""
+    body = b"a" * (2 * 1024 * 1024)  # 2 MiB, deutlich über dem 1-MiB-Default
+
+    response = _post(client, body)
+
+    assert response.status_code == 413
+    assert memory_backend.messages == []
+
+
+def test_malformed_content_length_header_falls_back_to_reading_body(
+    client, memory_backend
+):
+    """Ein nicht-numerischer Content-Length-Header darf den Endpoint nicht
+    zum Absturz bringen — die Größe wird stattdessen nach dem Lesen anhand
+    des tatsächlichen Bodys geprüft."""
+    body = json.dumps(EVENT).encode()
+
+    response = client.post(
+        PATH,
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": "not-a-number",
+            SIGNATURE_HEADER: sign(TEST_SECRET, int(time.time()), body),
+        },
+    )
+
+    assert response.status_code == 204
+    assert len(memory_backend.messages) == 1
+
+
+def test_oversized_body_without_content_length_is_rejected_with_413(
+    client, memory_backend
+):
+    """Fehlt Content-Length (z.B. Chunked-Transfer ohne den Header), muss die
+    Größe nach dem Lesen des Bodys geprüft werden."""
+    body = b"a" * (2 * 1024 * 1024)  # 2 MiB
+
+    def _chunks():
+        yield body
+
+    response = client.post(
+        PATH,
+        content=_chunks(),
+        headers={
+            "Content-Type": "application/json",
+            SIGNATURE_HEADER: sign(TEST_SECRET, int(time.time()), body),
+        },
+    )
+
+    assert response.status_code == 413
+    assert memory_backend.messages == []
+
+
+def test_unknown_reason_is_accepted(client, memory_backend):
+    """Unbekannte ``reason``-Werte dürfen NICHT abgelehnt werden — sonst 48 h
+    Retry-Sturm, exakt wie beim unbekannten ``type``."""
+    body = json.dumps(
+        {**EVENT, "data": {**EVENT["data"], "reason": "galactic_alignment"}}
+    ).encode()
+
+    assert _post(client, body).status_code == 204
+
+
+def test_empty_string_error_fields_are_accepted(client, memory_backend):
+    """``error: {"category": "", "message": ""}`` ist strukturell gültig
+    (leere Strings, kein ``null``) und muss durchgehen."""
+    body = json.dumps({**EVENT, "error": {"category": "", "message": ""}}).encode()
+
+    assert _post(client, body).status_code == 204
+
+
+def test_unknown_fields_in_data_and_envelope_are_accepted(client, memory_backend):
+    """Neue, unbekannte Felder — sowohl im Envelope als auch in ``data`` —
+    müssen durchgehen (``extra="allow"`` auf beiden Modellen)."""
+    body = json.dumps(
+        {
+            **EVENT,
+            "future_envelope_field": "irgendwas",
+            "data": {**EVENT["data"], "future_data_field": "irgendwas"},
+        }
+    ).encode()
+
+    assert _post(client, body).status_code == 204
+
+
+def test_unsigned_non_json_body_is_rejected_with_401_not_400(client, memory_backend):
+    """Reihenfolge-Test: Die Signaturprüfung muss VOR dem Parsen laufen. Ein
+    unsignierter, nicht-JSON Body muss deshalb 401 ergeben, nicht 400 — sonst
+    hätte ein Angreifer ohne gültige Signatur schon strukturelles Feedback."""
+    response = client.post(PATH, content=b"kein json und unsigniert")
+
+    assert response.status_code == 401
+    assert memory_backend.messages == []
+
+
+def test_invalid_signature_logs_warning_without_secrets(client, memory_backend, caplog):
+    """401 wird geloggt (Hinweis auf mögliche Secret-Rotation), aber ohne Body
+    oder Signaturwert — keine Payloads/Secrets in Logs."""
+    body = json.dumps(EVENT).encode()
+
+    with caplog.at_level(
+        logging.WARNING, logger="edutap.webhook_heidi.handlers.fastapi"
+    ):
+        response = client.post(
+            PATH,
+            content=body,
+            headers={SIGNATURE_HEADER: "t=1,v1=deadbeefdeadbeef"},
+        )
+
+    assert response.status_code == 401
+    records = [
+        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    logged = records[0].getMessage()
+    assert "deadbeefdeadbeef" not in logged
+    assert EVENT["data"]["person_id"] not in logged
+    assert EVENT["id"] not in logged
+
+
+def test_malformed_envelope_logs_info_with_reason(client, memory_backend, caplog):
+    body = json.dumps({"id": "evt_1"}).encode()
+
+    with caplog.at_level(logging.INFO, logger="edutap.webhook_heidi.handlers.fastapi"):
+        response = _post(client, body)
+
+    assert response.status_code == 400
+    records = [
+        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+
+
+def test_oversized_body_logs_warning_with_size(client, memory_backend, caplog):
+    body = b"a" * (2 * 1024 * 1024)
+
+    with caplog.at_level(
+        logging.WARNING, logger="edutap.webhook_heidi.handlers.fastapi"
+    ):
+        response = _post(client, body)
+
+    assert response.status_code == 413
+    records = [
+        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert str(len(body)) in records[0].getMessage()
+
+
+def test_queue_unavailable_logs_error_with_event_id(
+    client, failing_queue_backend, caplog
+):
+    with caplog.at_level(logging.ERROR, logger="edutap.webhook_heidi.handlers.fastapi"):
+        response = _post(client, json.dumps(EVENT).encode())
+
+    assert response.status_code == 503
+    records = [
+        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert EVENT["id"] in records[0].getMessage()
+
+
+def test_successful_enqueue_logs_debug_with_event_id(client, memory_backend, caplog):
+    with caplog.at_level(logging.DEBUG, logger="edutap.webhook_heidi.handlers.fastapi"):
+        response = _post(client, json.dumps(EVENT).encode())
+
+    assert response.status_code == 204
+    records = [
+        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert EVENT["id"] in records[0].getMessage()

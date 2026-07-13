@@ -27,6 +27,12 @@ class Settings(BaseSettings):
 
     signature_tolerance_seconds: int = 300
 
+    max_body_bytes: int = 1_048_576
+    """Obergrenze für den rohen Request-Body (1 MiB). Echte Pass-Events sind
+    wenige KB groß; der Endpoint prüft diese Grenze VOR dem Lesen/Puffern des
+    Bodys (wo möglich, per ``Content-Length``), damit ein unauthentifizierter
+    Absender nicht beliebig viel Speicher belegen kann (Memory-DoS)."""
+
     # Enqueue — muss deutlich unter dem 30-s-Timeout des Senders bleiben
     enqueue_timeout: float = 10.0
 
