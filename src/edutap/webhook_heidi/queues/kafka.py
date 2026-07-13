@@ -16,6 +16,10 @@ from edutap.webhook_heidi.settings import Settings
 
 import asyncio
 import json
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class KafkaQueueBackend:
@@ -65,7 +69,29 @@ class KafkaQueueBackend:
                     try:
                         await producer.start()
                     except KafkaError as exc:
+                        # aiokafka räumt bei einem Verbindungsfehler (Broker
+                        # weg, Connection refused, ...) selbst auf -- der
+                        # `stop()` hier ist defensiv, nicht der Kernfix.
+                        await producer.stop()
                         raise QueueUnavailable(f"{type(exc).__name__}: {exc}") from exc
+                    except BaseException:
+                        # Auch (und vor allem) asyncio.CancelledError: der
+                        # Producer-Start läuft innerhalb von enqueue()s
+                        # asyncio.wait_for(enqueue_timeout) -- das kann uns
+                        # HIER, mitten in producer.start(), abbrechen.
+                        # CancelledError erbt seit Python 3.8 von
+                        # BaseException, nicht von Exception; ein
+                        # "except Exception" würde es durchlassen. Ohne den
+                        # Stop hier bliebe ein halb gestarteter Producer mit
+                        # offenem Socket zurück, den niemand mehr erreicht:
+                        # self._producer wird erst NACH start() zugewiesen,
+                        # also bleibt es None und stop() (auch
+                        # KafkaQueueBackend.stop()) greift ins Leere.
+                        # Gemessener Leak ohne diesen Fix: 1 offener Socket +
+                        # 2 Tasks pro abgebrochenem enqueue(), linear
+                        # wachsend, nie freigegeben.
+                        await producer.stop()
+                        raise
                     self._producer = producer
         return self._producer
 
@@ -83,7 +109,19 @@ class KafkaQueueBackend:
                         auto_offset_reset="earliest",
                         **self._auth(),
                     )
-                    await consumer.start()
+                    try:
+                        await consumer.start()
+                    except BaseException:
+                        # Gleiches Muster/gleicher Grund wie in
+                        # _get_producer(): consume() kann von außen (z.B.
+                        # beim Herunterfahren des Spooler-Tasks) mitten in
+                        # consumer.start() abgebrochen werden
+                        # (CancelledError). Ohne den Stop hier bliebe ein
+                        # halb gestarteter Consumer mit offenem Socket
+                        # zurück, den stop() nie erreicht (self._consumer
+                        # bleibt None).
+                        await consumer.stop()
+                        raise
                     self._consumer = consumer
         return self._consumer
 
@@ -150,7 +188,20 @@ class KafkaQueueBackend:
         immer.
         """
         record = self._records.pop(id(message), None)
-        if record is None or self._consumer is None:
+        if record is None:
+            # Nicht dasselbe Objekt, das consume() geliefert hat -- z.B. weil
+            # der Aufrufer die Nachricht durch eine eigene Queue geschickt
+            # hat (QueueMessage.model_validate(m.model_dump())). Ohne dieses
+            # Log wäre das eine Redelivery-Endlosschleife ohne jeden
+            # Hinweis: kein Commit, keine Exception.
+            logger.warning(
+                "ack(): Nachricht (eventid=%s) nicht in _records gefunden -- "
+                "nichts committet. Vermutlich wurde nicht dasselbe Objekt "
+                "geackt, das consume() geliefert hat.",
+                message.eventid,
+            )
+            return
+        if self._consumer is None:
             return
         topic, partition, offset = record
         await self._consumer.commit({TopicPartition(topic, partition): offset + 1})

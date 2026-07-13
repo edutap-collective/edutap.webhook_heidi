@@ -41,6 +41,16 @@ class QueueBackend(Protocol):
         und außerhalb dieser Reihenfolge (oder unvollständig) ackt,
         überspringt dabei stillschweigend die dazwischenliegenden
         Nachrichten — sie gelten als verarbeitet, obwohl sie es nie waren.
+
+        Identität, nicht Gleichheit: ``ack()`` muss dasselbe Objekt
+        bekommen, das ``consume()`` geliefert hat, nicht eine gleichwertige
+        Kopie. Ein Consumer, der die Nachricht z.B. durch eine eigene Queue
+        schickt (``QueueMessage.model_validate(m.model_dump())``) und dann
+        die Kopie ackt, committet dadurch nichts — ohne Fehler, ohne Log
+        (sofern das Backend das nicht selbst meldet) —, was zu einer
+        Redelivery-Endlosschleife ohne jeden Hinweis führt. Der Aufrufer
+        muss die Nachricht also bis zum ``ack()`` referenzieren, statt sie
+        zu re-serialisieren.
         """
         ...
 

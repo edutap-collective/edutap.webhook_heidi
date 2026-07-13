@@ -188,3 +188,34 @@ All notable changes to this project are documented here.
   Schritten, aber nur im `TEST_REQUIRE_KAFKA`-Pfad — lokal ohne
   absichtlich laufenden Broker bleibt der schnelle Einzelversuch, damit
   der Skip-Hinweis nicht künstlich verzögert wird.
+- `queues/kafka.py`: Regression aus dem vorigen Fix (`enqueue_timeout`
+  umschließt jetzt den Producer-Start) behoben — `asyncio.wait_for`
+  bricht `_get_producer()` dabei per `CancelledError` MITTEN in
+  `await producer.start()` ab. Die lokale `producer`-Variable ging dabei
+  verloren, `self._producer` blieb `None`: der halb gestartete Producer
+  (offener Socket + Hintergrundtasks) war damit für niemanden mehr
+  erreichbar, auch nicht für `stop()`. Gemessen gegen einen hängenden
+  Broker: linearer Leak, ein offener Socket pro abgebrochenem
+  `enqueue()`, nie freigegeben. Fix: `_get_producer()` fängt jetzt auch
+  `BaseException` (explizit inkl. `CancelledError`, das seit Python 3.8
+  nicht mehr von `Exception` erbt) und stoppt den halb gestarteten
+  Producer, bevor die Exception weiterfliegt. `_get_consumer()` bekommt
+  denselben Fix (gleiches Double-Checked-Locking-Muster, gleiche
+  Abbruchgefahr z. B. beim Herunterfahren des Spooler-Tasks). Reproduziert
+  in `test_repeated_enqueue_timeout_during_producer_start_does_not_leak`
+  (5x `enqueue()` gegen einen hängenden Fake-Producer, war ohne den Fix
+  rot: Socket-Zähler wuchs linear) und
+  `test_get_consumer_stops_half_started_consumer_on_cancel`.
+- `protocols.py`/`queues/kafka.py`: Die Identitätsregel für `ack()`
+  (`id(message)` erfordert dasselbe Objekt, das `consume()` geliefert
+  hat) stand bisher nur im Docstring von `kafka.py`, nicht im Protocol —
+  dem eigentlichen Vertrag, gegen den LMU programmiert. Jetzt auch in
+  `QueueBackend.ack()` (`protocols.py`) dokumentiert. Zusätzlich: `ack()`
+  eines unbekannten Nachrichtenobjekts (z. B. weil der Aufrufer die
+  Nachricht kopiert/neu erzeugt hat statt das Original zu acken) schluckte
+  das bisher still — kein Commit, keine Exception, kein Log, eine
+  Redelivery-Endlosschleife ohne jeden Hinweis. `ack()` loggt diesen Fall
+  jetzt als `warning` (Modul-Logger). Test umbenannt
+  (`test_ack_unknown_eventid_is_a_noop` →
+  `test_ack_unknown_message_warns_and_does_not_commit`) und um die
+  `caplog`-Assertion erweitert.

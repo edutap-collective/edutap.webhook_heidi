@@ -67,6 +67,33 @@ class _SlowStartProducer(_FakeProducer):
         self.started = True
 
 
+class _LeakTrackingSlowStartProducer(_FakeProducer):
+    """Wie ``_SlowStartProducer``, zählt aber offene "Sockets" (open_count)
+    und Instanzen, damit ein Test nachweisen kann, dass ein wegen
+    ``enqueue_timeout`` abgebrochener Producer-Start sein Socket wieder
+    schließt, statt es zu leaken. ``open_count`` steigt beim (simulierten)
+    TCP-Connect zu Beginn von ``start()`` -- wie ein echter Listener, der
+    TCP annimmt, aber nie antwortet -- und sinkt nur, wenn ``stop()``
+    tatsächlich aufgerufen wird."""
+
+    open_count: ClassVar[int] = 0
+    instances: ClassVar[list["_LeakTrackingSlowStartProducer"]] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        type(self).instances.append(self)
+
+    async def start(self) -> None:
+        type(self).open_count += 1
+        await asyncio.sleep(10)
+        self.started = True
+
+    async def stop(self) -> None:
+        if not self.stopped:
+            type(self).open_count -= 1
+        self.stopped = True
+
+
 class _FailingProducer(_FakeProducer):
     async def start(self) -> None:
         from aiokafka.errors import KafkaConnectionError
@@ -148,6 +175,22 @@ class _CountingConsumer(_FakeConsumer):
 
     async def start(self) -> None:
         await asyncio.sleep(0)
+        self.started = True
+
+
+class _SlowStartTrackingConsumer(_FakeConsumer):
+    """Wie ``_CountingConsumer``, aber ``start()`` hängt lange -- zum
+    Testen, dass ein von außen abgebrochener Consumer-Start aufgeräumt
+    wird (analog zum Producer-Leak-Fix in ``_get_producer()``)."""
+
+    instances: ClassVar[list["_SlowStartTrackingConsumer"]] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        type(self).instances.append(self)
+
+    async def start(self) -> None:
+        await asyncio.sleep(2)
         self.started = True
 
 
@@ -276,6 +319,47 @@ async def test_enqueue_timeout_covers_producer_start(monkeypatch):
     assert elapsed < 1.0, f"enqueue() dauerte {elapsed}s, enqueue_timeout=0.05s"
 
 
+async def test_repeated_enqueue_timeout_during_producer_start_does_not_leak(
+    monkeypatch,
+):
+    """Regression: seit enqueue_timeout auch den Producer-Start umschließt
+    (test_enqueue_timeout_covers_producer_start), bricht asyncio.wait_for
+    den _get_producer()-Aufruf per CancelledError MITTEN in
+    ``await producer.start()`` ab. Die lokale ``producer``-Variable geht
+    dabei verloren, ``self._producer`` bleibt None -- der halb gestartete
+    Producer (offener Socket) ist damit für niemanden mehr erreichbar,
+    auch nicht für ``backend.stop()``.
+
+    Gemessen gegen einen hängenden Broker, 5x enqueue() im Timeout:
+    nach enqueue Nr. N ohne Fix sind N Sockets offen und self._producer
+    bleibt None; nach backend.stop() bleiben alle N offen. Muss OHNE den
+    ``except BaseException: await producer.stop(); raise``-Fix in
+    ``_get_producer()`` rot sein (open_count wächst linear)."""
+    _LeakTrackingSlowStartProducer.open_count = 0
+    _LeakTrackingSlowStartProducer.instances = []
+    monkeypatch.setattr(
+        kafka_module, "AIOKafkaProducer", _LeakTrackingSlowStartProducer
+    )
+    settings = _settings()
+    settings.enqueue_timeout = 0.05
+    backend = KafkaQueueBackend(settings)
+
+    for i in range(5):
+        with pytest.raises(QueueUnavailable):
+            await backend.enqueue(_message(eventid=f"evt_{i}"))
+        assert _LeakTrackingSlowStartProducer.open_count == 0, (
+            f"nach enqueue #{i + 1}: "
+            f"{_LeakTrackingSlowStartProducer.open_count} Sockets offen "
+            f"({len(_LeakTrackingSlowStartProducer.instances)} Producer "
+            "erzeugt), self._producer sollte None sein"
+        )
+        assert backend._producer is None
+
+    await backend.stop()
+    assert _LeakTrackingSlowStartProducer.open_count == 0
+    assert len(_LeakTrackingSlowStartProducer.instances) == 5
+
+
 async def test_enqueue_kafka_error_from_send_raises_queue_unavailable(monkeypatch):
     """send_and_wait kann auch direkt (nicht nur per Timeout) scheitern, z.B.
     wenn der Broker während des Sends wegbricht."""
@@ -313,10 +397,53 @@ async def test_consume_and_ack_roundtrip(monkeypatch):
     assert consumer.commits == [{(record.topic, record.partition): 42}]
 
 
-async def test_ack_unknown_eventid_is_a_noop():
+async def test_ack_unknown_message_warns_and_does_not_commit(caplog):
+    """Die id(message)-Identitätsregel (siehe ack()-Docstring in
+    protocols.py/kafka.py) bricht STILL, wenn ein Consumer die Nachricht vor
+    dem ack() kopiert/neu erzeugt hat (z.B.
+    QueueMessage.model_validate(m.model_dump())): kein Commit, keine
+    Exception -- eine Redelivery-Endlosschleife ohne jeden Hinweis. ack()
+    muss diesen Fall deshalb mindestens loggen."""
     backend = KafkaQueueBackend(_settings())
     # Kein consume() vorher: _records ist leer, kein Consumer gestartet.
-    await backend.ack(_message(eventid="never-seen"))
+    with caplog.at_level("WARNING", logger="edutap.webhook_heidi.queues.kafka"):
+        await backend.ack(_message(eventid="never-seen"))
+
+    assert any(
+        "never-seen" in record.getMessage() and "ack" in record.getMessage().lower()
+        for record in caplog.records
+    )
+
+
+async def test_ack_after_stop_is_a_noop_and_does_not_warn(monkeypatch, caplog):
+    """Ein Shutdown (``stop()``) während eine Nachricht noch in Verarbeitung
+    ist, darf ``ack()`` nicht crashen lassen: ``self._consumer`` ist dann
+    None, obwohl der Record noch bekannt ist (kein Kopie-Fall, also auch
+    keine Warnung)."""
+    monkeypatch.setattr(kafka_module, "AIOKafkaConsumer", _FakeConsumer)
+    backend = KafkaQueueBackend(_settings())
+    message = _message(eventid="evt_1", passid="pass-a")
+    record = _FakeRecord(
+        topic=backend._settings.kafka_topic,
+        partition=0,
+        offset=5,
+        value=message.model_dump(mode="json"),
+        key=b"pass-a",
+    )
+    consumer = await backend._get_consumer()
+    consumer.records = [record]
+
+    seen = []
+    async for received in backend.consume():
+        seen.append(received)
+        break
+    backend._consumer = None  # simuliert stop() waehrend der Verarbeitung
+
+    with caplog.at_level("WARNING", logger="edutap.webhook_heidi.queues.kafka"):
+        await backend.ack(seen[0])
+
+    assert consumer.commits == []
+    assert caplog.records == []
 
 
 async def test_ack_commits_only_up_to_its_own_offset_with_duplicate_eventids(
@@ -409,3 +536,22 @@ async def test_concurrent_get_consumer_on_cold_backend_creates_one_consumer(
     await asyncio.gather(*(backend._get_consumer() for _ in range(5)))
 
     assert len(_CountingConsumer.instances) == 1
+
+
+async def test_get_consumer_stops_half_started_consumer_on_cancel(monkeypatch):
+    """Gleiches Muster/gleicher Fix wie beim Producer-Leak: ``consume()``
+    kann von außen (z.B. beim Herunterfahren des Spooler-Tasks) mitten in
+    ``consumer.start()`` abgebrochen werden. Ohne den
+    ``except BaseException: await consumer.stop(); raise``-Fix in
+    ``_get_consumer()`` bliebe der halb gestartete Consumer mit offenem
+    Socket zurück, self._consumer bleibt None."""
+    _SlowStartTrackingConsumer.instances = []
+    monkeypatch.setattr(kafka_module, "AIOKafkaConsumer", _SlowStartTrackingConsumer)
+    backend = KafkaQueueBackend(_settings())
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(backend._get_consumer(), timeout=0.05)
+
+    assert backend._consumer is None
+    assert len(_SlowStartTrackingConsumer.instances) == 1
+    assert _SlowStartTrackingConsumer.instances[0].stopped is True
