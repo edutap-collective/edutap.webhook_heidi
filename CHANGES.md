@@ -66,6 +66,34 @@ All notable changes to this project are documented here.
 
 ### Fixes
 
+- `tests/conftest.py` (`kafka_settings`-Fixture): Der bisherige Broker-Check
+  war ein reiner TCP-Connect gegen `localhost:9092` — auf Entwicklermaschinen
+  mit einem Port-Forward auf genau diesem Port (z.B. VS Code) meldete das
+  fälschlich "Broker da", und die Tests liefen los, um dann mit
+  `KafkaConnectionError` zu scheitern (kein echtes Kafka-Protokoll dahinter).
+  Der Check startet jetzt probeweise einen echten `AIOKafkaProducer` (2,5 s
+  Timeout) statt nur den Port zu prüfen. Die Adresse kommt konfigurierbar aus
+  `EDUTAP_WEBHOOK_HEIDI_KAFKA_BOOTSTRAP_SERVERS` (Default weiterhin
+  `localhost:9092`), damit man lokal ohne Codeänderung auf einen freien Port
+  ausweichen kann. Neu: `EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1` schaltet
+  von "kein Broker -> skip" auf "kein Broker -> `pytest.fail`" um — gesetzt in
+  `.github/workflows/tests.yaml` für den Test-Job, damit die CI hart scheitert,
+  falls der Kafka-Service-Container aus irgendeinem Grund nicht erreichbar
+  ist, statt still (und potenziell dauerhaft) grün zu bleiben.
+- `tests/test_queues_kafka_unit.py` (neu): Unit-Tests für
+  `KafkaQueueBackend` gegen Fake-Producer/-Consumer, ohne Broker-Abhängigkeit
+  — decken `_get_producer`/`_get_consumer` (inkl. Caching), `enqueue`
+  (Erfolg und Timeout), `consume`/`ack`-Roundtrip und `stop()` ab, die
+  vorher nur über die `@pytest.mark.kafka`-Tests (und damit nur mit
+  laufendem Broker) erreichbar waren. Grund: `queues/kafka.py` ist das
+  einzige produktive Queue-Backend und muss unabhängig davon vollständig
+  gemessen sein, ob gerade ein Broker läuft — sonst fällt die Coverage lokal
+  (ohne Broker) unter das 90-%-Gate, obwohl in der CI (mit Broker) alles
+  grün wäre. Die bestehenden `@pytest.mark.kafka`-Integrationstests bleiben
+  unverändert bestehen und wurden gegen einen echten lokalen Broker
+  verifiziert (Roundtrip verlustfrei inkl. `timestamp`/`payload`,
+  Partition-Key ist `passid`, `QueueUnavailable` bei nicht erreichbarem
+  Broker und bei Enqueue-Timeout).
 - `signing.verify`: Nicht-ASCII-Zeichen in einem gefälschten
   `Heidi-Signature`-Header lösten zuvor eine unbehandelte `TypeError`
   in `hmac.compare_digest` aus (Starlette dekodiert Header mit

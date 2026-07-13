@@ -52,6 +52,13 @@ jobs:
         run: uv venv && uv pip install -e ".[test,kafka]"
 
       - name: Run tests with coverage
+        env:
+          # Der Service-Container liefert den Broker auf 9092. Ist er aus
+          # irgendeinem Grund nicht erreichbar, sollen die Kafka-Tests hart
+          # fehlschlagen (pytest.fail), statt still übersprungen zu werden —
+          # ein Skip hier wäre eine grüne Pipeline, die das einzige
+          # produktive Queue-Backend nie getestet hat.
+          EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA: "1"
         run: uv run pytest --cov --cov-report=
 
       - name: Rename coverage data
