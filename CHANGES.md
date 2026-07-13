@@ -8,3 +8,4 @@ All notable changes to this project are documented here.
 
 - Initial project scaffold: CI/CD, packaging, pre-commit, and handoff
   documentation. No functional code yet — see [docs/HANDOFF.md](docs/HANDOFF.md).
+- Settings (pydantic-settings) für Webhook-Secret, Signatur-Toleranz und Kafka.
