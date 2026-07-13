@@ -17,12 +17,25 @@
 Nicht Teil des Pakets: jegliche Consumer-Logik hinter der Queue. Der erste
 Consumer ist `lmu_edutap_full_view` mit einem eigenen `HeidiWebhookSpooler`.
 
-```
-heidi.cloud ──POST (signiert)──▶ webhook_heidi ──enqueue──▶ Pass-Queue (Kafka)
-                                                                  │
-                                                          consume/ack
-                                                                  ▼
-                                                    Consumer-Spooler (LMU)
+```mermaid
+flowchart LR
+    HC["heidi.cloud<br/>Dispatcher"]
+    WH["webhook_heidi<br/>FastAPI-Endpoint"]
+    Q[("Pass-Queue<br/>Kafka")]
+    SP["HeidiWebhookSpooler<br/>(LMU, nicht in diesem Paket)"]
+    DB[("PassState")]
+
+    HC -- "POST, HMAC-signiert<br/>at-least-once" --> WH
+    WH -- "204 / 401 / 503" --> HC
+    WH -- "enqueue()<br/>key = passid" --> Q
+    Q -- "consume()" --> SP
+    SP -- "ack()" --> Q
+    SP -- "dedup über eventid<br/>→ write" --> DB
+
+    subgraph paket ["edutap.webhook_heidi"]
+        WH
+        Q
+    end
 ```
 
 Der Sender existiert bereits: heidi.cloud, Branch `feature-customer-webhooks`,
@@ -119,6 +132,56 @@ header = f"t={timestamp},v1={digest}"
   unverändert erneut gesendet — aber die **Bytes können sich unterscheiden**
   (JSONB-Roundtrip: normalisierte Key-Reihenfolge, `\u`-escapes). Pro Versuch
   wird neu signiert.
+
+### 2.5 Der Datenfluss im Zeitverlauf
+
+Der interessante Teil ist nicht der Happy Path, sondern was ein Fehlschlag
+auslöst — und warum am Ende der Consumer deduplizieren muss:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant HC as heidi.cloud
+    participant WH as webhook_heidi
+    participant Q as Kafka
+    participant SP as Spooler (LMU)
+
+    Note over HC,WH: Normalfall
+    HC->>WH: POST evt_a1  (Heidi-Signature: t=…,v1=…)
+    WH->>WH: verify(raw bytes) ✓
+    WH->>Q: enqueue(key=passid), acks=all
+    Q-->>WH: committed
+    WH-->>HC: 204
+    Q->>SP: consume()
+    SP->>Q: ack()
+
+    Note over HC,WH: Queue weg → wir haben nichts verloren
+    HC->>WH: POST evt_b2
+    WH->>Q: enqueue()
+    Q--xWH: nicht erreichbar
+    WH-->>HC: 503
+    Note over HC: Backoff 1m → 5m → 30m → 2h → 6h<br/>bis zu 12 Versuche über 48 h
+
+    HC->>WH: POST evt_b2  (Retry — gleiche id,<br/>ANDERE Bytes, neu signiert)
+    WH->>WH: verify(raw bytes) ✓
+    WH->>Q: enqueue()
+    WH-->>HC: 204
+
+    Note over HC,SP: Duplikat: Zustellung kam an,<br/>aber unsere Antwort ging verloren
+    HC->>WH: POST evt_a1  (nochmal)
+    WH->>Q: enqueue()
+    WH-->>HC: 204
+    Q->>SP: consume() → evt_a1 zum zweiten Mal
+    SP->>SP: eventid bereits gesehen → verwerfen
+    SP->>Q: ack()
+```
+
+Zwei Dinge werden hier sichtbar. Erstens: Wir antworten **erst nach dem
+bestätigten Kafka-Write**. Würden wir vorher 204 senden und der Write ginge
+verloren, wäre das Event endgültig weg — der Sender wiederholt ja nur bei
+Non-2xx. Zweitens: Der Webhook selbst dedupliziert **nicht**. Er kann es bei
+Kafka gar nicht, also landet dasselbe Event ggf. mehrfach in der Queue, und der
+Spooler wirft Duplikate anhand der `eventid` weg.
 
 ## 3. Architektur
 
@@ -235,16 +298,27 @@ Retry-Fenster), besser 28 Tage (dann sind auch Admin-Redeliveries abgedeckt).
 POST {handler_prefix}    ->  204 | 200 | 400 | 401 | 503
 ```
 
-Ablauf:
+```mermaid
+flowchart TD
+    A["POST /webhook/heidi"] --> B["raw bytes lesen<br/>await request.body()"]
+    B --> C{"Heidi-Signature gültig?<br/>HMAC über f'{t}.' + raw bytes<br/>abs(now − t) ≤ 300 s"}
+    C -- nein --> C1["401"]
+    C -- ja --> D{"Envelope parsebar?<br/>id / type / data"}
+    D -- nein --> D1["400"]
+    D -- ja --> E{"type == webhook.test?"}
+    E -- ja --> E1["200<br/>(kein enqueue)"]
+    E -- nein --> F["QueueMessage bauen"]
+    F --> G{"enqueue() bestätigt?<br/>Kafka acks=all"}
+    G -- nein --> G1["503"]
+    G -- ja --> G2["204"]
 
-1. **Raw Bytes lesen** (`await request.body()`) — *vor* jedem Parsen.
-2. `Heidi-Signature` prüfen: Format `t=…,v1=…`, Toleranz 300 s,
-   `hmac.compare_digest`. Fehlschlag → **401**.
-3. Envelope parsen. Nicht parsebar → **400**.
-4. `type == "webhook.test"` → **200**, kein Enqueue.
-5. `QueueMessage` bauen, `enqueue()` — **erst nach bestätigtem Write** (Kafka
-   `acks=all`) antworten. Fehlschlag → **503**.
-6. → **204**.
+    C1 -.-> R["Sender wiederholt:<br/>12× über 48 h"]
+    D1 -.-> R
+    G1 -.-> R
+```
+
+Unbekannte `type`- oder `reason`-Werte fallen **nicht** in den 400-Zweig — sie
+laufen durch und landen roh im `payload` (siehe §5.1).
 
 ### 5.1 Zwei nicht offensichtliche Regeln
 
