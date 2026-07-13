@@ -63,6 +63,24 @@ All notable changes to this project are documented here.
   Enqueue als `debug` mit `event.id`.
 - OpenAPI-Dokumentation der Statuscodes (`responses={...}` an
   `@router.post`) für 200/204/400/401/413/503.
+- `README.md`: neuer Abschnitt „Verwendung" für Consumer (LMU
+  `lmu_edutap_full_view`) — Webhook einbinden, vollständige
+  Env-Var-Referenz (inkl. `max_body_bytes` und der Kafka-SASL-Felder),
+  Entry-Point-Registrierung des Kafka-Backends sowie das Lesen/Acken der
+  Queue im Spooler. Dokumentiert explizit die drei Vertragsregeln aus
+  `protocols.py`/`queues/kafka.py`, die sonst stille Bugs beim Consumer
+  wären: Dedup ist Pflicht (at-least-once, mind. 48 h, empfohlen 28 Tage
+  vorhalten), `ack()` muss sequenziell erfolgen (kumulative
+  Offset-Commits), und `ack()` braucht dasselbe Objekt, das `consume()`
+  geliefert hat (Identität, nicht Gleichheit — eine Kopie ackt ins Leere).
+  Neuer Abschnitt „Betrieb" zu Reihenfolgegarantien (nur je `passid`,
+  nicht global), Secret-Rotation ohne Überlappungsfenster (401 löst
+  Retry aus, kein Eventverlust bei rechtzeitigem Deployment) und der
+  Pflicht zu HTTPS (Signatur schützt nicht vor Mitlesen; Payload enthält
+  `person_id`/`pass_id`). Abschnitt „What this package does" korrigiert:
+  ausprogrammiert ist Kafka, Postgres/Redis sind reine Platzhalter-Extras
+  in `pyproject.toml`. Alle Codebeispiele gegen die tatsächlichen
+  Importpfade/Funktionsnamen/Env-Var-Namen verifiziert.
 
 ### Fixes
 
