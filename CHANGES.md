@@ -16,6 +16,16 @@ All notable changes to this project are documented here.
   `Heidi-Signature`-Header) gegen die rohen Body-Bytes — nicht gegen
   re-serialisiertes JSON, damit erneut signierte Retries mit anderer
   Key-Reihenfolge verifizierbar bleiben.
+- `QueueBackend`-Protocol (`protocols.py`) mit `enqueue`/`consume`/`ack`/`stop`
+  — beide Seiten der Pass-Queue in einer Abstraktion, damit der Consumer
+  (LMU-Spooler) weder aiokafka noch Offsets kennen muss. Backend-Auswahl
+  per setuptools-Entry-Point (`plugins.py`, Gruppe
+  `edutap.webhook_heidi.plugins`), analog zu `edutap.wallet_google`/
+  `edutap.wallet_apple`; `get_queue_backend()` liefert eine gecachte Instanz,
+  `add_plugin()`/`reset_queue_backend()` dienen Tests und Einbettung.
+- `InMemoryQueueBackend` (`queues/memory.py`) für Tests und lokale
+  Entwicklung ohne Broker; dedupliziert bewusst nicht — das ist Aufgabe des
+  Consumers.
 
 ### Fixes
 
