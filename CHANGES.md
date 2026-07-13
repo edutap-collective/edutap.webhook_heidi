@@ -26,6 +26,15 @@ All notable changes to this project are documented here.
 - `InMemoryQueueBackend` (`queues/memory.py`) für Tests und lokale
   Entwicklung ohne Broker; dedupliziert bewusst nicht — das ist Aufgabe des
   Consumers.
+- FastAPI-Endpoint (`handlers/fastapi.py`, `router` unter `POST
+  {handler_prefix}`) für die eingehenden heidi.cloud-Webhooks: prüft die
+  Signatur gegen die rohen Body-Bytes, parst danach lax auf `WebhookEvent`
+  und schreibt in die konfigurierte Queue. Statuscodes sind Vertrag, nicht
+  Geschmack — heidi.cloud wiederholt jedes Non-2xx bis zu 12x über 48 h:
+  204 bei erfolgreichem Enqueue, 200 bei `webhook.test` (angenommen, aber
+  nicht enqueued), 401 nur bei ungültiger/fehlender Signatur, 400 nur wenn
+  strukturell kein Envelope vorliegt, 503 wenn die Queue nicht erreichbar
+  ist. Unbekannte `type`-Werte werden durchgereicht und enden mit 204.
 
 ### Fixes
 

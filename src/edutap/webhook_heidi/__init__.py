@@ -1,4 +1,5 @@
-"""edutap.webhook_heidi — webhook endpoint and swappable pass-event queue.
+"""edutap.webhook_heidi — Webhook-Endpoint und austauschbare Pass-Event-Queue.
 
-This is a scaffold. No functional code yet — see ``docs/HANDOFF.md``.
+Empfänger der Customer-Webhooks von heidi.cloud. Siehe
+``docs/superpowers/specs/2026-07-13-webhook-heidi-design.md``.
 """
