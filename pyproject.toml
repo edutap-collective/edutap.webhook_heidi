@@ -70,6 +70,9 @@ packages = ["src/edutap"]
 minversion = "7.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "kafka: braucht einen laufenden Kafka-Broker (wird ohne Broker übersprungen)",
+]
 
 [tool.coverage.run]
 parallel = true

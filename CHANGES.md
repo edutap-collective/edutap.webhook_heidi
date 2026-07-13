@@ -24,6 +24,27 @@ All notable changes to this project are documented here.
 - `InMemoryQueueBackend` (`queues/memory.py`) für Tests und lokale
   Entwicklung ohne Broker; dedupliziert bewusst nicht — das ist Aufgabe des
   Consumers.
+- `KafkaQueueBackend` (`queues/kafka.py`, Extra `[kafka]`) — das produktive
+  Queue-Backend: der Webhook-Endpoint schreibt Pass-Events hinein
+  (`enqueue`), der LMU-Spooler liest sie heraus (`consume`/`ack`). Producer
+  idempotent mit `acks="all"` — wir antworten heidi.cloud erst 2xx, wenn der
+  Broker den Write bestätigt hat; ein verlorener Produce-Call vor dem Ack
+  wäre ein endgültig verlorenes Event, da der Sender nur bei Non-2xx
+  wiederholt (analog zu `heidi.cloud/kafka/base.py`). Partition-Key ist
+  `passid`, nicht `eventid`: Kafka garantiert Reihenfolge nur innerhalb
+  einer Partition, das ist die einzige Garantie, dass z. B. ein
+  `pass.uninstalled` nie vor dem zugehörigen `pass.installed` verarbeitet
+  wird. Consumer mit manuellem Offset-Commit (`enable_auto_commit=False`),
+  damit `ack()` echte Bedeutung hat. Enqueue-Fehler (Broker weg, Timeout via
+  `Settings.enqueue_timeout`) werden immer als `QueueUnavailable` geworfen,
+  nie als aiokafka-spezifische Exception — nur so löst der Endpoint sein
+  503 aus.
+- Tests markiert `@pytest.mark.kafka` (`tests/test_queues_kafka.py`) laufen
+  gegen einen echten lokalen Broker (`kafka_settings`-Fixture,
+  `tests/conftest.py`) und werden ohne erreichbaren Broker auf
+  `localhost:9092` übersprungen. CI (`.github/workflows/tests.yaml`) startet
+  dafür einen `apache/kafka`-Service-Container auf Port 9092 und installiert
+  das Extra `[test,kafka]`.
 - FastAPI-Endpoint (`handlers/fastapi.py`, `router` unter `POST
   {handler_prefix}`) für die eingehenden heidi.cloud-Webhooks: prüft die
   Signatur gegen die rohen Body-Bytes, parst danach lax auf `WebhookEvent`
