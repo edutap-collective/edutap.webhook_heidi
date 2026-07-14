@@ -1,5 +1,32 @@
 # Handoff: edutap.webhook_heidi
 
+> ⚠️ **This document is historical and outdated.** It was written *before* the
+> implementation (and before the sender/`heidi.cloud` payload was fully
+> known). The authoritative, up-to-date reference is the **design spec**:
+> [`docs/superpowers/specs/2026-07-13-webhook-heidi-design.md`](superpowers/specs/2026-07-13-webhook-heidi-design.md).
+> This HANDOFF is wrong on at least three points that matter for LMU
+> (spec §9 has the full detail):
+>
+> 1. **No EPPN in the payload.** Section 2 below claims `EPPN` is "the
+>    central person key" and that pass events reference it. They do not —
+>    heidi.cloud has no concept of EPPN; the payload only carries an opaque
+>    `person_id`. Any EPPN mapping is entirely the consumer's job.
+> 2. **Kafka, not Postgres, is the decided/implemented backend.** Section 5
+>    below recommends starting with Postgres "to unblock the LMU consumer".
+>    That recommendation was superseded: **Kafka** was decided and is the
+>    only backend implemented in v1 (`[kafka]` extra). Postgres/Redis remain
+>    unimplemented placeholder extras.
+> 3. **The `state` values below are wrong**, and the data format is *not*
+>    still open. The actual `state` values are `NEW | INSTALL_PENDING |
+>    UPDATE_PENDING | DELETE_PENDING | ACTIVE | INACTIVE`; strings like
+>    "provisioned"/"suspended"/"deactivated" are `reason` values, not states.
+>    The full `QueueMessage`/`WebhookEvent` schema is implemented and
+>    documented in the spec (§4) and in `src/edutap/webhook_heidi/models.py`.
+>
+> Everything else below (motivation, CI/CD philosophy, house conventions) is
+> still useful background, but for anything about the data model, the
+> backend, or person identity, follow the spec, not this file.
+
 > **Purpose of this document.** This repository was scaffolded (boilerplate +
 > CI/CD only) so that *you*, the next agent working here, can finish setting up
 > and then implement the package. This document carries the context you need:

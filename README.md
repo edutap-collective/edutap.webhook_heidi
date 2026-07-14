@@ -4,7 +4,11 @@ Webhook endpoint and swappable **pass-event queue** for the eduTAP / HEIDI
 system. Part of the [eduTAP](https://github.com/edutap-eu/) organisation.
 
 > For background on the project (motivation, architecture, house
-> conventions), see **[docs/HANDOFF.md](docs/HANDOFF.md)**.
+> conventions, data model, error handling), see the **design spec**:
+> **[docs/superpowers/specs/2026-07-13-webhook-heidi-design.md](docs/superpowers/specs/2026-07-13-webhook-heidi-design.md)**.
+> `docs/HANDOFF.md` is a historical scaffolding document and is **outdated**
+> on several points the spec corrects (see the notice at the top of that
+> file) — do not use it as a reference.
 
 ## What this package does
 
@@ -12,21 +16,24 @@ system. Part of the [eduTAP](https://github.com/edutap-eu/) organisation.
   pass is provisioned, suspended, deactivated, etc. It validates the event and
   writes it to the pass-event queue.
 - **Pass-Queue** — a queue abstraction with **swappable backends**. **Kafka**
-  is implemented (`[kafka]` extra). Postgres/Redis are placeholder extras in
-  `pyproject.toml` only — not implemented; they will land once a consumer
-  actually needs them.
+  is implemented (`[kafka]` extra) and is the only backend in v1. Postgres/Redis
+  are placeholder extras in `pyproject.toml` only — not implemented; they will
+  land once a consumer actually needs them.
 
 Consumers depend on this package, run the webhook, and read the queue with their
 own domain-specific spooler. The first consumer and reference use-case is
-**`lmu_edutap_full_view`** (LMU) — see [docs/HANDOFF.md](docs/HANDOFF.md).
+**`lmu_edutap_full_view`** (LMU) — see the
+[design spec](docs/superpowers/specs/2026-07-13-webhook-heidi-design.md).
 
 ## Installation
 
 ```bash
 pip install edutap.webhook-heidi
 
-# with a queue backend:
-pip install "edutap.webhook-heidi[postgres]"   # or [kafka] / [redis]
+# with the Kafka queue backend (the only implemented backend in v1):
+pip install "edutap.webhook-heidi[kafka]"
+
+# [postgres] / [redis] are placeholder extras only — no backend behind them yet.
 ```
 
 ## Verwendung
@@ -40,6 +47,30 @@ from fastapi import FastAPI
 app = FastAPI()
 app.include_router(router)
 ```
+
+> **Sauberes Shutdown.** `QueueBackend.stop()` (`protocols.py`) fährt
+> Producer/Consumer sauber herunter — bei Kafka verlässt der Consumer damit
+> ordentlich die Consumer-Group, statt bis zum Session-Timeout zu hängen und
+> ein Rebalance zu blockieren. Ruft niemand `stop()` auf, passiert das nicht
+> automatisch. Für den Webhook (Producer-Seite) deshalb per FastAPI-Lifespan
+> beim Shutdown aufrufen:
+>
+> ```python
+> from contextlib import asynccontextmanager
+> from edutap.webhook_heidi.handlers.fastapi import router
+> from edutap.webhook_heidi.plugins import get_queue_backend
+> from fastapi import FastAPI
+>
+>
+> @asynccontextmanager
+> async def lifespan(app: FastAPI):
+>     yield
+>     await get_queue_backend().stop()
+>
+>
+> app = FastAPI(lifespan=lifespan)
+> app.include_router(router)
+> ```
 
 Konfiguration ausschließlich über Umgebungsvariablen (Prefix
 `EDUTAP_WEBHOOK_HEIDI_`) bzw. `.env`:
@@ -83,13 +114,22 @@ QueueBackend = 'edutap.webhook_heidi.queues.kafka:KafkaQueueBackend'
 from edutap.webhook_heidi.plugins import get_queue_backend
 
 backend = get_queue_backend()
-async for message in backend.consume():
-    if already_seen(message.eventid):   # <- Pflicht, siehe unten
-        await backend.ack(message)
-        continue
-    handle(message)                     # eigene Logik
-    await backend.ack(message)          # dasselbe `message`-Objekt, siehe unten
+try:
+    async for message in backend.consume():
+        if already_seen(message.eventid):   # <- Pflicht, siehe unten
+            await backend.ack(message)
+            continue
+        handle(message)                     # eigene Logik
+        await backend.ack(message)          # dasselbe `message`-Objekt, siehe unten
+finally:
+    await backend.stop()   # verlässt die Kafka-Consumer-Group sauber, siehe unten
 ```
+
+> **`stop()` nicht vergessen.** Ohne `await backend.stop()` beim Beenden des
+> Spooler-Tasks (z. B. bei Shutdown/Neustart) verlässt der Kafka-Consumer die
+> Consumer-Group nicht sauber — das Rebalance hängt dann bis zum
+> Session-Timeout. `try`/`finally` stellt sicher, dass `stop()` auch bei
+> einer Exception in `handle()` noch läuft.
 
 > **Deduplizieren ist Pflicht.** heidi.cloud liefert **at-least-once** (bis zu
 > 12 Versuche über 48 h), und Kafka kann beim Schreiben nicht deduplizieren.

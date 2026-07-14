@@ -40,8 +40,11 @@ Issues = "https://github.com/edutap-eu/edutap.webhook_heidi/issues"
 Documentation = "https://docs.edutap.eu/packages/edutap_webhook_heidi/index.html"
 
 [project.optional-dependencies]
-# Queue backends — reference implementations, common data format still TBD.
-# See docs/HANDOFF.md.
+# Queue backends. [kafka] is implemented and is the only backend in v1
+# (decided, see docs/superpowers/specs/2026-07-13-webhook-heidi-design.md).
+# [postgres]/[redis] are placeholder extras only — declared here so the
+# dependency stays reserved, but there is no backend implementation behind
+# them yet; they will land once a consumer actually needs them.
 postgres = ["psycopg[binary,pool]>=3.1"]
 kafka = ["aiokafka>=0.10"]
 redis = ["redis>=5.0"]
