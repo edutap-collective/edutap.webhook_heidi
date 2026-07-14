@@ -6,18 +6,31 @@ Router-Prefix kommt aus den Settings — Hauskonvention von wallet_google/apple)
 das Modul importiert wird. Deshalb hier auf Modulebene, nicht in einer Fixture.
 """
 
+from collections.abc import Callable
+from edutap.webhook_heidi import plugins as plugins_module
 from edutap.webhook_heidi.plugins import add_plugin
 from edutap.webhook_heidi.plugins import get_queue_backend
 from edutap.webhook_heidi.plugins import reset_queue_backend
 from edutap.webhook_heidi.queues.memory import InMemoryQueueBackend
 from edutap.webhook_heidi.settings import ENV_PREFIX
 from edutap.webhook_heidi.settings import Settings
+from importlib import metadata
 
 import asyncio
 import contextlib
 import os
 import pytest
 import uuid
+
+
+ENTRY_POINT_GROUP = "edutap.webhook_heidi.plugins"
+"""Der dokumentierte, echte Entry-Point-Vertrag (README/Spec §3.2) — bewusst
+hier als eigene Konstante und NICHT aus ``plugins_module.ENTRY_POINT_GROUP``
+importiert. Würde die Fixture die Konstante aus dem Produktivmodul lesen,
+liefe sie bei einem Tippfehler/Rename dort automatisch mit und der Test
+bliebe grün — genau die Lücke aus IMPORTANT 1."""
+
+ENTRY_POINT_NAME = "QueueBackend"
 
 
 TEST_SECRET = "0123456789abcdef" * 4
@@ -45,6 +58,44 @@ def _kafka_required() -> bool:
         "false",
         "no",
     )
+
+
+@pytest.fixture
+def entrypoints_testing(monkeypatch) -> Callable:
+    """Monkeypatcht ``entry_points`` sowohl in ``importlib.metadata`` ALS AUCH
+    im bereits importierten ``plugins``-Modul (Vorbild: ``entrypoints_testing``
+    in ``edutap.wallet_apple/tests/conftest.py``).
+
+    Der zweite Patch ist der eigentliche Grund für diese Fixture:
+    ``plugins.py`` importiert den Namen lokal (``from importlib.metadata
+    import entry_points``) und hält danach eine eigene Referenz darauf — ein
+    Patch nur auf ``importlib.metadata.entry_points`` würde diese lokale
+    Referenz nicht treffen, ``plugins.get_queue_backend()`` riefe weiterhin
+    die echte (leere) Funktion auf.
+
+    Registriert genau EINEN Entry-Point unter dem dokumentierten Vertrag
+    (Gruppe ``edutap.webhook_heidi.plugins``, Name ``QueueBackend``), der auf
+    ``tests.plugins:EntryPointQueueBackend`` zeigt — bewusst NICHT über
+    ``add_plugin()``, sondern über den echten, von Consumern genutzten
+    Ladeweg. Siehe ``test_backend_loaded_via_real_entry_point_mechanism`` in
+    ``tests/test_plugins.py`` (IMPORTANT 1 im Abschluss-Review).
+    """
+    eps = {
+        ENTRY_POINT_GROUP: [
+            metadata.EntryPoint(
+                name=ENTRY_POINT_NAME,
+                value="plugins:EntryPointQueueBackend",
+                group=ENTRY_POINT_GROUP,
+            ),
+        ]
+    }
+
+    def mock_entry_points(group: str):
+        return eps.get(group, [])
+
+    monkeypatch.setattr(metadata, "entry_points", mock_entry_points)
+    monkeypatch.setattr(plugins_module, "entry_points", mock_entry_points)
+    return mock_entry_points
 
 
 @pytest.fixture
