@@ -104,6 +104,7 @@ async def _read_body_limited(request: Request, limit: int) -> bytes:
         },
     },
 )
+@router.post("/", status_code=204, include_in_schema=False)
 async def handle_pass_event(request: Request) -> Response:
     """Nimmt ein Pass-Event von heidi.cloud entgegen und schreibt es in die Queue."""
     # Größe VOR jedem Puffern prüfen — unauthentifiziert beliebig viel

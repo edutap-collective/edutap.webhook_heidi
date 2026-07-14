@@ -452,6 +452,32 @@ def test_queue_unavailable_logs_error_with_event_id(
     assert EVENT["id"] in records[0].getMessage()
 
 
+def test_trailing_slash_is_accepted_directly(client, memory_backend):
+    """IMPORTANT 2 (Abschluss-Review): ``POST {handler_prefix}/`` (mit
+    Slash) darf NICHT auf 307 umgeleitet werden. heidi.cloud folgt keinen
+    Redirects (httpx-Default: ``follow_redirects=False``) und wertet nur 2xx
+    als Erfolg -- ein 307 wäre für den Sender ein Fehlschlag, der 12x über
+    48 h wiederholt wird und dann endgültig verloren geht, ohne dass unser
+    Code je etwas davon loggt (der Redirect passiert vor dem Handler).
+
+    ``follow_redirects=False`` hier ist bewusst explizit, nicht der
+    TestClient-Default -- er soll genau das reale heidi.cloud-Verhalten
+    nachbilden, nicht das großzügigere httpx-Test-Default."""
+    body = json.dumps(EVENT).encode()
+    response = client.post(
+        PATH + "/",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            SIGNATURE_HEADER: sign(TEST_SECRET, int(time.time()), body),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 204
+    assert len(memory_backend.messages) == 1
+
+
 def test_successful_enqueue_logs_debug_with_event_id(client, memory_backend, caplog):
     with caplog.at_level(logging.DEBUG, logger="edutap.webhook_heidi.handlers.fastapi"):
         response = _post(client, json.dumps(EVENT).encode())
