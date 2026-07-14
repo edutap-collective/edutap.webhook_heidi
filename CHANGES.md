@@ -84,6 +84,78 @@ All notable changes to this project are documented here.
 
 ### Fixes
 
+- **Abschluss-Review — Entry-Point-Pfad ungetestet (IMPORTANT 1):** Bis zu
+  diesem Fix hing keine einzige Test-Suite ein Backend jemals über den echten
+  `importlib.metadata.entry_points()`-Mechanismus ein — alle nutzten
+  `add_plugin()`. Ein Tippfehler oder Rename an `plugins.ENTRY_POINT_GROUP`/
+  `plugins.PLUGIN_NAME` ging dadurch grün durch die CI (verifiziert: beide
+  Konstanten testweise auf Unsinn gesetzt, alle 90 bisherigen Tests blieben
+  grün). Neu: `entrypoints_testing`-Fixture (`tests/conftest.py`, Vorbild
+  `edutap.wallet_apple/tests/conftest.py`), die `entry_points` sowohl in
+  `importlib.metadata` als auch im bereits importierten `plugins`-Modul
+  monkeypatcht, plus `EntryPointQueueBackend` (`tests/plugins.py`) und
+  `test_backend_loaded_via_real_entry_point_mechanism`
+  (`tests/test_plugins.py`), der `get_queue_backend()` ausschließlich über
+  den echten Entry-Point-Ladeweg prüft. Verifiziert: mit denselben verdrehten
+  Konstanten wird jetzt genau dieser eine Test rot.
+- **Abschluss-Review — Trailing Slash verliert Events (IMPORTANT 2):** `POST
+  {handler_prefix}/` (mit Slash) lieferte `307` (Starlettes
+  `redirect_slashes`). heidi.cloud folgt keinen Redirects (httpx-Default) und
+  wertet nur 2xx als Erfolg — ein 307 hätte 12 Retries über 48 h ausgelöst
+  und das Event dann endgültig verloren, ohne dass unser Code je etwas
+  geloggt hätte (der Redirect passiert vor dem Handler). `handlers/fastapi.py`
+  registriert die Route jetzt zusätzlich mit Slash
+  (`@router.post("/", status_code=204, include_in_schema=False)`), sodass
+  beide Formen direkt (`204`) funktionieren, unabhängig davon, wie der
+  Consumer sein `FastAPI(redirect_slashes=...)` konfiguriert. Die
+  OpenAPI-Doku zeigt weiterhin nur einen Eintrag (`include_in_schema=False`
+  auf der Slash-Variante). Neuer Test
+  `test_trailing_slash_is_accepted_directly`
+  (`tests/test_handlers_fastapi.py`), rot ohne den Fix (307 statt 204).
+- **Abschluss-Review — keine Naht-Tests Endpoint→Kafka (MINOR 6):** Jeder
+  Test deckte bisher nur seine eigene Schicht (Handler nur gegen das
+  In-Memory-Backend, Kafka-Backend nur direkt). Neu:
+  `tests/test_integration_kafka.py` (`@pytest.mark.kafka`), das den echten
+  Pfad geht — ASGI-POST (signiertes Event) → `router` → `KafkaQueueBackend`
+  als registriertes Plugin → echter Broker → `consume()`/`ack()`. Prüft,
+  dass `payload` inkl. verschachtelter Felder (`preset`/`device`)
+  unverändert ankommt, `timestamp` korrekt ist und die Reihenfolge je
+  `passid` gewahrt bleibt. Nutzt bewusst `httpx.AsyncClient`/`ASGITransport`
+  statt `fastapi.testclient.TestClient`: `TestClient` öffnet pro
+  `.post()`-Aufruf (außerhalb von `with TestClient(...) as client:`) einen
+  neuen, kurzlebigen `anyio`-Portal-Thread mit eigenem Event-Loop, an den
+  sich der lazy erzeugte aiokafka-Producer bindet — jeder weitere Zugriff
+  (zweiter Request, `consume()`/`stop()` im Test) lief dadurch auf einem
+  bereits geschlossenen Loop (`RuntimeError: Event loop is closed` beim
+  Teardown, Timeout beim zweiten Enqueue). `httpx.AsyncClient` führt den
+  ASGI-Call dagegen im laufenden pytest-asyncio-Loop aus.
+- **Abschluss-Review — CI-Matrix kollabiert auf einen Interpreter (MINOR 7):**
+  `.github/workflows/tests.yaml` rief `uv venv` ohne `--python` auf — lief
+  bisher nur zufällig richtig, weil pro Runner genau ein gemanagter
+  Interpreter vorlag. Fix: `uv venv --python ${{ matrix.python-version }}`.
+- **Abschluss-Review — README verweist auf veraltetes HANDOFF (MINOR 3):**
+  `README.md` verlinkte zweimal auf `docs/HANDOFF.md`, das in drei für LMU
+  relevanten Punkten irrt (EPPN als Personenschlüssel gibt es nicht, nur
+  `person_id`; empfiehlt Postgres statt des entschiedenen Kafka; falsche
+  `state`-Werte). README verweist jetzt stattdessen auf die Spec
+  (`docs/superpowers/specs/2026-07-13-webhook-heidi-design.md`);
+  `docs/HANDOFF.md` trägt jetzt oben einen Hinweis, dass es historisch und
+  überholt ist, mit den drei konkreten Irrtümern.
+- **Abschluss-Review — Installationsbeispiel bewirbt nicht implementierte
+  Extras (MINOR 4):** `README.md` empfahl u.a. `pip install
+  "edutap.webhook-heidi[postgres]"`, obwohl nur `[kafka]` implementiert ist.
+  Installationsbeispiel korrigiert auf `[kafka]`, Postgres/Redis explizit als
+  Platzhalter gekennzeichnet. `pyproject.toml`: veralteter Kommentar bei den
+  Extras ("common data format still TBD. See docs/HANDOFF.md") ersetzt durch
+  eine Beschreibung, die den aktuellen Stand (Kafka entschieden/implementiert,
+  Postgres/Redis Platzhalter) wiedergibt.
+- **Abschluss-Review — `stop()` nirgends aufgerufen/dokumentiert (MINOR 5):**
+  `protocols.py` deklariert `stop()`, beide Backends implementieren es, aber
+  weder das README-Spooler-Beispiel noch ein Lifespan-Hinweis riefen es je
+  auf — Folge: der Kafka-Consumer verlässt die Consumer-Group nicht sauber,
+  das Rebalance hängt bis zum Session-Timeout. README: Spooler-Beispiel um
+  `try`/`finally: await backend.stop()` ergänzt, neuer FastAPI-Lifespan-
+  Codeblock, der beim Shutdown `await get_queue_backend().stop()` aufruft.
 - `tests/conftest.py` (`kafka_settings`-Fixture): Der bisherige Broker-Check
   war ein reiner TCP-Connect gegen `localhost:9092` — auf Entwicklermaschinen
   mit einem Port-Forward auf genau diesem Port (z.B. VS Code) meldete das
