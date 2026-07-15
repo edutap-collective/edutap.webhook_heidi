@@ -15,6 +15,10 @@ wheels/
 venv/
 env/
 
+# Local secrets / settings — never commit (webhook_secret lives here)
+.env
+.env.*
+
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
