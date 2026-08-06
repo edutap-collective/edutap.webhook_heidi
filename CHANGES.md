@@ -6,306 +6,267 @@ All notable changes to this project are documented here.
 
 ### Features
 
-- Settings (pydantic-settings) für Webhook-Secret, Signatur-Toleranz und Kafka.
-- Datenmodelle `WebhookEvent`/`WebhookEventData` (Envelope, bewusst lax
-  validiert, `extra="allow"`) und `QueueMessage` inkl. `from_event()` für die
-  Pass-Queue-Nachricht.
-- HMAC-SHA256-Signaturprüfung (`signing.sign`/`signing.verify`, Stripe-Stil,
-  `Heidi-Signature`-Header) gegen die rohen Body-Bytes — nicht gegen
-  re-serialisiertes JSON, damit erneut signierte Retries mit anderer
-  Key-Reihenfolge verifizierbar bleiben.
-- `QueueBackend`-Protocol (`protocols.py`) mit `enqueue`/`consume`/`ack`/`stop`
-  — beide Seiten der Pass-Queue in einer Abstraktion, damit der Consumer
-  (LMU-Spooler) weder aiokafka noch Offsets kennen muss. Backend-Auswahl
-  per setuptools-Entry-Point (`plugins.py`, Gruppe
-  `edutap.webhook_heidi.plugins`), analog zu `edutap.wallet_google`/
-  `edutap.wallet_apple`; `get_queue_backend()` liefert eine gecachte Instanz,
-  `add_plugin()`/`reset_queue_backend()` dienen Tests und Einbettung.
-- `InMemoryQueueBackend` (`queues/memory.py`) für Tests und lokale
-  Entwicklung ohne Broker; dedupliziert bewusst nicht — das ist Aufgabe des
-  Consumers.
-- `KafkaQueueBackend` (`queues/kafka.py`, Extra `[kafka]`) — das produktive
-  Queue-Backend: der Webhook-Endpoint schreibt Pass-Events hinein
-  (`enqueue`), der LMU-Spooler liest sie heraus (`consume`/`ack`). Producer
-  idempotent mit `acks="all"` — wir antworten heidi.cloud erst 2xx, wenn der
-  Broker den Write bestätigt hat; ein verlorener Produce-Call vor dem Ack
-  wäre ein endgültig verlorenes Event, da der Sender nur bei Non-2xx
-  wiederholt (analog zu `heidi.cloud/kafka/base.py`). Partition-Key ist
-  `passid`, nicht `eventid`: Kafka garantiert Reihenfolge nur innerhalb
-  einer Partition, das ist die einzige Garantie, dass z. B. ein
-  `pass.uninstalled` nie vor dem zugehörigen `pass.installed` verarbeitet
-  wird. Consumer mit manuellem Offset-Commit (`enable_auto_commit=False`),
-  damit `ack()` echte Bedeutung hat. Enqueue-Fehler (Broker weg, Timeout via
-  `Settings.enqueue_timeout`) werden immer als `QueueUnavailable` geworfen,
-  nie als aiokafka-spezifische Exception — nur so löst der Endpoint sein
-  503 aus.
-- Tests markiert `@pytest.mark.kafka` (`tests/test_queues_kafka.py`) laufen
-  gegen einen echten lokalen Broker (`kafka_settings`-Fixture,
-  `tests/conftest.py`) und werden ohne erreichbaren Broker auf
-  `localhost:9092` übersprungen. CI (`.github/workflows/tests.yaml`) startet
-  dafür einen `apache/kafka`-Service-Container auf Port 9092 und installiert
-  das Extra `[test,kafka]`.
-- FastAPI-Endpoint (`handlers/fastapi.py`, `router` unter `POST
-  {handler_prefix}`) für die eingehenden heidi.cloud-Webhooks: prüft die
-  Signatur gegen die rohen Body-Bytes, parst danach lax auf `WebhookEvent`
-  und schreibt in die konfigurierte Queue. Statuscodes sind Vertrag, nicht
-  Geschmack — heidi.cloud wiederholt jedes Non-2xx bis zu 12x über 48 h:
-  204 bei erfolgreichem Enqueue, 200 bei `webhook.test` (angenommen, aber
-  nicht enqueued), 401 nur bei ungültiger/fehlender Signatur, 400 nur wenn
-  strukturell kein Envelope vorliegt, 503 wenn die Queue nicht erreichbar
-  ist. Unbekannte `type`-Werte werden durchgereicht und enden mit 204.
-- `Settings.max_body_bytes` (Default 1 MiB): Obergrenze für den rohen
-  Request-Body, geprüft bevor er gepuffert wird.
-- Logging im Webhook-Endpoint (`logging.getLogger(__name__)` in
-  `handlers/fastapi.py`): 401 als `warning` (ohne Body/Signaturwert, mit
-  Hinweis auf mögliche Secret-Rotation), 400 als `info` mit dem Grund, 413
-  als `warning` mit der Größe, 503 als `error` mit `event.id`, erfolgreicher
-  Enqueue als `debug` mit `event.id`.
-- OpenAPI-Dokumentation der Statuscodes (`responses={...}` an
-  `@router.post`) für 200/204/400/401/413/503.
-- `README.md`: neuer Abschnitt „Verwendung" für Consumer (LMU
-  `lmu_edutap_full_view`) — Webhook einbinden, vollständige
-  Env-Var-Referenz (inkl. `max_body_bytes` und der Kafka-SASL-Felder),
-  Entry-Point-Registrierung des Kafka-Backends sowie das Lesen/Acken der
-  Queue im Spooler. Dokumentiert explizit die drei Vertragsregeln aus
-  `protocols.py`/`queues/kafka.py`, die sonst stille Bugs beim Consumer
-  wären: Dedup ist Pflicht (at-least-once, mind. 48 h, empfohlen 28 Tage
-  vorhalten), `ack()` muss sequenziell erfolgen (kumulative
-  Offset-Commits), und `ack()` braucht dasselbe Objekt, das `consume()`
-  geliefert hat (Identität, nicht Gleichheit — eine Kopie ackt ins Leere).
-  Neuer Abschnitt „Betrieb" zu Reihenfolgegarantien (nur je `passid`,
-  nicht global), Secret-Rotation ohne Überlappungsfenster (401 löst
-  Retry aus, kein Eventverlust bei rechtzeitigem Deployment) und der
-  Pflicht zu HTTPS (Signatur schützt nicht vor Mitlesen; Payload enthält
-  `person_id`/`pass_id`). Abschnitt „What this package does" korrigiert:
-  ausprogrammiert ist Kafka, Postgres/Redis sind reine Platzhalter-Extras
-  in `pyproject.toml`. Alle Codebeispiele gegen die tatsächlichen
-  Importpfade/Funktionsnamen/Env-Var-Namen verifiziert.
+- Settings (pydantic-settings) for the webhook secret, the signature tolerance and
+  Kafka.
+- Data models `WebhookEvent`/`WebhookEventData` (the envelope, deliberately validated
+  loosely, `extra="allow"`) and `QueueMessage` including `from_event()` for the
+  pass-queue message.
+- HMAC-SHA256 signature verification (`signing.sign`/`signing.verify`, Stripe style,
+  `Heidi-Signature` header) against the raw body bytes — not against re-serialised
+  JSON, so that re-signed retries with a different key order stay verifiable.
+- The `QueueBackend` protocol (`protocols.py`) with `enqueue`/`consume`/`ack`/`stop`
+  — both sides of the pass queue in one abstraction, so the consumer (the LMU
+  spooler) needs to know neither aiokafka nor offsets. The backend is selected
+  through a setuptools entry point (`plugins.py`, group
+  `edutap.webhook_heidi.plugins`), as in `edutap.wallet_google` and
+  `edutap.wallet_apple`; `get_queue_backend()` returns a cached instance, while
+  `add_plugin()`/`reset_queue_backend()` serve tests and embedding.
+- `InMemoryQueueBackend` (`queues/memory.py`) for tests and local development
+  without a broker; it deliberately does not deduplicate — that is the consumer's
+  job.
+- `KafkaQueueBackend` (`queues/kafka.py`, extra `[kafka]`) — the production queue
+  backend: the webhook endpoint writes pass events into it (`enqueue`), the LMU
+  spooler reads them out (`consume`/`ack`). The producer is idempotent with
+  `acks="all"` — we only answer heidi.cloud with a 2xx once the broker has confirmed
+  the write; a produce call lost before the ack would be an event lost for good,
+  since the sender only retries on non-2xx (mirroring `heidi.cloud/kafka/base.py`).
+  The partition key is `passid`, not `eventid`: Kafka guarantees ordering only
+  within a partition, and that is the only guarantee that, say, a `pass.uninstalled`
+  is never processed before its `pass.installed`. The consumer commits offsets
+  manually (`enable_auto_commit=False`) so that `ack()` means something. Enqueue
+  failures (broker gone, timeout via `Settings.enqueue_timeout`) are always raised as
+  `QueueUnavailable`, never as an aiokafka-specific exception — only then does the
+  endpoint produce its 503.
+- Tests marked `@pytest.mark.kafka` (`tests/test_queues_kafka.py`) run against a real
+  local broker (the `kafka_settings` fixture, `tests/conftest.py`) and are skipped
+  when no broker is reachable on `localhost:9092`. CI
+  (`.github/workflows/tests.yaml`) starts an `apache/kafka` service container on port
+  9092 for them and installs the `[test,kafka]` extra.
+- FastAPI endpoint (`handlers/fastapi.py`, `router` under `POST {handler_prefix}`)
+  for the incoming heidi.cloud webhooks: it verifies the signature against the raw
+  body bytes, then parses loosely into `WebhookEvent` and writes to the configured
+  queue. Status codes are contract, not taste — heidi.cloud retries every non-2xx up
+  to 12 times over 48 h: 204 on a successful enqueue, 200 for `webhook.test`
+  (accepted but not enqueued), 401 only for an invalid or missing signature, 400 only
+  when there is structurally no envelope, 503 when the queue is unreachable. Unknown
+  `type` values are passed through and end in a 204.
+- `Settings.max_body_bytes` (default 1 MiB): an upper bound on the raw request body,
+  checked before it is buffered.
+- Logging in the webhook endpoint (`logging.getLogger(__name__)` in
+  `handlers/fastapi.py`): 401 as `warning` (without body or signature value, with a
+  hint about a possible secret rotation), 400 as `info` with the reason, 413 as
+  `warning` with the size, 503 as `error` with `event.id`, a successful enqueue as
+  `debug` with `event.id`.
+- OpenAPI documentation of the status codes (`responses={...}` on `@router.post`) for
+  200/204/400/401/413/503.
+- `README.md`: a new "Usage" section for consumers (LMU's `lmu_edutap_full_view`) —
+  wiring up the webhook, a complete environment variable reference (including
+  `max_body_bytes` and the Kafka SASL fields), entry-point registration of the Kafka
+  backend, and reading and acking the queue in a spooler. It documents explicitly the
+  three contract rules from `protocols.py`/`queues/kafka.py` that would otherwise
+  become silent bugs on the consumer side: deduplication is mandatory (at-least-once,
+  keep for at least 48 h, 28 days recommended), `ack()` has to be sequential
+  (cumulative offset commits), and `ack()` needs the very object `consume()` returned
+  (identity, not equality — a copy acks into the void). A new "Operations" section
+  covers ordering guarantees (per `passid` only, not global), secret rotation without
+  an overlap window (a 401 triggers retries, so no events are lost if the deployment
+  is timely), and the requirement to use HTTPS (the signature does not protect against
+  eavesdropping; the payload carries `person_id`/`pass_id`). The "What this package
+  does" section is corrected: Kafka is implemented, Postgres and Redis are placeholder
+  extras in `pyproject.toml` only. Every code example was verified against the actual
+  import paths, function names and environment variable names.
 
 ### Fixes
 
-- **Abschluss-Review — Entry-Point-Pfad ungetestet (IMPORTANT 1):** Bis zu
-  diesem Fix hing keine einzige Test-Suite ein Backend jemals über den echten
-  `importlib.metadata.entry_points()`-Mechanismus ein — alle nutzten
-  `add_plugin()`. Ein Tippfehler oder Rename an `plugins.ENTRY_POINT_GROUP`/
-  `plugins.PLUGIN_NAME` ging dadurch grün durch die CI (verifiziert: beide
-  Konstanten testweise auf Unsinn gesetzt, alle 90 bisherigen Tests blieben
-  grün). Neu: `entrypoints_testing`-Fixture (`tests/conftest.py`, Vorbild
-  `edutap.wallet_apple/tests/conftest.py`), die `entry_points` sowohl in
-  `importlib.metadata` als auch im bereits importierten `plugins`-Modul
-  monkeypatcht, plus `EntryPointQueueBackend` (`tests/plugins.py`) und
-  `test_backend_loaded_via_real_entry_point_mechanism`
-  (`tests/test_plugins.py`), der `get_queue_backend()` ausschließlich über
-  den echten Entry-Point-Ladeweg prüft. Verifiziert: mit denselben verdrehten
-  Konstanten wird jetzt genau dieser eine Test rot.
-- **Abschluss-Review — Trailing Slash verliert Events (IMPORTANT 2):** `POST
-  {handler_prefix}/` (mit Slash) lieferte `307` (Starlettes
-  `redirect_slashes`). heidi.cloud folgt keinen Redirects (httpx-Default) und
-  wertet nur 2xx als Erfolg — ein 307 hätte 12 Retries über 48 h ausgelöst
-  und das Event dann endgültig verloren, ohne dass unser Code je etwas
-  geloggt hätte (der Redirect passiert vor dem Handler). `handlers/fastapi.py`
-  registriert die Route jetzt zusätzlich mit Slash
-  (`@router.post("/", status_code=204, include_in_schema=False)`), sodass
-  beide Formen direkt (`204`) funktionieren, unabhängig davon, wie der
-  Consumer sein `FastAPI(redirect_slashes=...)` konfiguriert. Die
-  OpenAPI-Doku zeigt weiterhin nur einen Eintrag (`include_in_schema=False`
-  auf der Slash-Variante). Neuer Test
-  `test_trailing_slash_is_accepted_directly`
-  (`tests/test_handlers_fastapi.py`), rot ohne den Fix (307 statt 204).
-- **Abschluss-Review — keine Naht-Tests Endpoint→Kafka (MINOR 6):** Jeder
-  Test deckte bisher nur seine eigene Schicht (Handler nur gegen das
-  In-Memory-Backend, Kafka-Backend nur direkt). Neu:
-  `tests/test_integration_kafka.py` (`@pytest.mark.kafka`), das den echten
-  Pfad geht — ASGI-POST (signiertes Event) → `router` → `KafkaQueueBackend`
-  als registriertes Plugin → echter Broker → `consume()`/`ack()`. Prüft,
-  dass `payload` inkl. verschachtelter Felder (`preset`/`device`)
-  unverändert ankommt, `timestamp` korrekt ist und die Reihenfolge je
-  `passid` gewahrt bleibt. Nutzt bewusst `httpx.AsyncClient`/`ASGITransport`
-  statt `fastapi.testclient.TestClient`: `TestClient` öffnet pro
-  `.post()`-Aufruf (außerhalb von `with TestClient(...) as client:`) einen
-  neuen, kurzlebigen `anyio`-Portal-Thread mit eigenem Event-Loop, an den
-  sich der lazy erzeugte aiokafka-Producer bindet — jeder weitere Zugriff
-  (zweiter Request, `consume()`/`stop()` im Test) lief dadurch auf einem
-  bereits geschlossenen Loop (`RuntimeError: Event loop is closed` beim
-  Teardown, Timeout beim zweiten Enqueue). `httpx.AsyncClient` führt den
-  ASGI-Call dagegen im laufenden pytest-asyncio-Loop aus.
-- **Abschluss-Review — CI-Matrix kollabiert auf einen Interpreter (MINOR 7):**
-  `.github/workflows/tests.yaml` rief `uv venv` ohne `--python` auf — lief
-  bisher nur zufällig richtig, weil pro Runner genau ein gemanagter
-  Interpreter vorlag. Fix: `uv venv --python ${{ matrix.python-version }}`.
-- **Abschluss-Review — README verweist auf veraltetes HANDOFF (MINOR 3):**
-  `README.md` verlinkte zweimal auf `docs/HANDOFF.md`, das in drei für LMU
-  relevanten Punkten irrt (EPPN als Personenschlüssel gibt es nicht, nur
-  `person_id`; empfiehlt Postgres statt des entschiedenen Kafka; falsche
-  `state`-Werte). README verweist jetzt stattdessen auf die Spec
-  (`docs/superpowers/specs/2026-07-13-webhook-heidi-design.md`);
-  `docs/HANDOFF.md` trägt jetzt oben einen Hinweis, dass es historisch und
-  überholt ist, mit den drei konkreten Irrtümern.
-- **Abschluss-Review — Installationsbeispiel bewirbt nicht implementierte
-  Extras (MINOR 4):** `README.md` empfahl u.a. `pip install
-  "edutap.webhook-heidi[postgres]"`, obwohl nur `[kafka]` implementiert ist.
-  Installationsbeispiel korrigiert auf `[kafka]`, Postgres/Redis explizit als
-  Platzhalter gekennzeichnet. `pyproject.toml`: veralteter Kommentar bei den
-  Extras ("common data format still TBD. See docs/HANDOFF.md") ersetzt durch
-  eine Beschreibung, die den aktuellen Stand (Kafka entschieden/implementiert,
-  Postgres/Redis Platzhalter) wiedergibt.
-- **Abschluss-Review — `stop()` nirgends aufgerufen/dokumentiert (MINOR 5):**
-  `protocols.py` deklariert `stop()`, beide Backends implementieren es, aber
-  weder das README-Spooler-Beispiel noch ein Lifespan-Hinweis riefen es je
-  auf — Folge: der Kafka-Consumer verlässt die Consumer-Group nicht sauber,
-  das Rebalance hängt bis zum Session-Timeout. README: Spooler-Beispiel um
-  `try`/`finally: await backend.stop()` ergänzt, neuer FastAPI-Lifespan-
-  Codeblock, der beim Shutdown `await get_queue_backend().stop()` aufruft.
-- `tests/conftest.py` (`kafka_settings`-Fixture): Der bisherige Broker-Check
-  war ein reiner TCP-Connect gegen `localhost:9092` — auf Entwicklermaschinen
-  mit einem Port-Forward auf genau diesem Port (z.B. VS Code) meldete das
-  fälschlich "Broker da", und die Tests liefen los, um dann mit
-  `KafkaConnectionError` zu scheitern (kein echtes Kafka-Protokoll dahinter).
-  Der Check startet jetzt probeweise einen echten `AIOKafkaProducer` (2,5 s
-  Timeout) statt nur den Port zu prüfen. Die Adresse kommt konfigurierbar aus
-  `EDUTAP_WEBHOOK_HEIDI_KAFKA_BOOTSTRAP_SERVERS` (Default weiterhin
-  `localhost:9092`), damit man lokal ohne Codeänderung auf einen freien Port
-  ausweichen kann. Neu: `EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1` schaltet
-  von "kein Broker -> skip" auf "kein Broker -> `pytest.fail`" um — gesetzt in
-  `.github/workflows/tests.yaml` für den Test-Job, damit die CI hart scheitert,
-  falls der Kafka-Service-Container aus irgendeinem Grund nicht erreichbar
-  ist, statt still (und potenziell dauerhaft) grün zu bleiben.
-- `tests/test_queues_kafka_unit.py` (neu): Unit-Tests für
-  `KafkaQueueBackend` gegen Fake-Producer/-Consumer, ohne Broker-Abhängigkeit
-  — decken `_get_producer`/`_get_consumer` (inkl. Caching), `enqueue`
-  (Erfolg und Timeout), `consume`/`ack`-Roundtrip und `stop()` ab, die
-  vorher nur über die `@pytest.mark.kafka`-Tests (und damit nur mit
-  laufendem Broker) erreichbar waren. Grund: `queues/kafka.py` ist das
-  einzige produktive Queue-Backend und muss unabhängig davon vollständig
-  gemessen sein, ob gerade ein Broker läuft — sonst fällt die Coverage lokal
-  (ohne Broker) unter das 90-%-Gate, obwohl in der CI (mit Broker) alles
-  grün wäre. Die bestehenden `@pytest.mark.kafka`-Integrationstests bleiben
-  unverändert bestehen und wurden gegen einen echten lokalen Broker
-  verifiziert (Roundtrip verlustfrei inkl. `timestamp`/`payload`,
-  Partition-Key ist `passid`, `QueueUnavailable` bei nicht erreichbarem
-  Broker und bei Enqueue-Timeout).
-- `signing.verify`: Nicht-ASCII-Zeichen in einem gefälschten
-  `Heidi-Signature`-Header lösten zuvor eine unbehandelte `TypeError`
-  in `hmac.compare_digest` aus (Starlette dekodiert Header mit
-  latin-1), was aus einer 401 eine 500 machte. Der Vergleich läuft
-  jetzt über die dekodierten Digest-Bytes (`bytes.fromhex`) statt über
-  Header-Strings; ungültiges Hex ergibt `False`. Zusätzlich: leeres
-  Secret wird abgelehnt, und der Zeitstempel muss ein reiner
-  Ziffernstring sein (kein `+`-Präfix, keine `_`-Trenner).
-- `handlers/fastapi.py`: Zwei Wege führten zuvor zu einem 500 statt 503 —
-  kein Backend registriert (`get_queue_backend()` wirft `NotImplementedError`)
-  und ein Backend, das etwas anderes als `QueueUnavailable` wirft (z.B.
-  `ConnectionResetError`, `asyncio.TimeoutError`). Der Enqueue-Pfad fängt
-  jetzt `Exception` breit ab und antwortet immer mit 503 — ein 500 wäre für
-  heidi.cloud identisch zu einem 503 (beides Non-2xx, beides löst bis zu 12h
-  Retries über 48 h aus), erzeugt aber unnötig Stacktraces/Alerts. Zusätzlich
-  wird das Backend beim Modul-Import versuchsweise aufgelöst (Fail-Fast in
-  der Produktion, wo der Entry-Point statisch vorhanden ist), ohne den
-  Import zu sprengen, falls es dort noch fehlt.
-- `handlers/fastapi.py`: `await request.body()` puffert den kompletten Body
-  im Speicher, bevor irgendetwas geprüft ist — ein unauthentifizierter
-  Memory-DoS. Der Endpoint prüft jetzt `Content-Length` gegen
-  `settings.max_body_bytes`, bevor der Body gelesen wird (413 ohne zu
-  lesen); fehlt der Header oder ist er falsch, wird die Länge nach dem Lesen
-  geprüft (413 bei Überschreitung).
-- `handlers/fastapi.py`: Der `Content-Length`-Vorcheck greift nicht, wenn der
-  Header fehlt (z.B. Chunked Transfer Encoding ohne den Header) — `await
-  request.body()` puffert dann trotzdem unbegrenzt, bevor die
-  Größenprüfung zum Zug kommt. Der Body wird jetzt über eine neue
-  `_read_body_limited()` inkrementell per `request.stream()` gelesen und
-  bricht sofort mit 413 ab, sobald `max_body_bytes` überschritten ist, statt
-  den Rest noch zu puffern.
-- `handlers/fastapi.py`: Der 400-Log beim Envelope-Parsen loggte `str(exc)`
-  einer pydantic-`ValidationError` — die bettet den validierten Eingabewert
-  ein (z.B. die Matrikelnummer in `person_id` bei LMU), landete also
-  ungewollt auf INFO-Level im Log. Geloggt werden jetzt nur noch
-  `exc.error_count()` und die Fehlerorte (`e["loc"]` je Fehler), nie ein Wert.
-- `handlers/fastapi.py`: `logger.error(...)` im generischen Enqueue-Fehlerfall
-  durch `logger.exception(...)` ersetzt, damit der Traceback erhalten bleibt.
-  `QueueMessage.from_event(event)` aus dem `try`-Block vor den `try` gezogen,
-  damit ein Modellfehler dort nicht fälschlich als 503 statt als eigener Bug
-  erscheint. Import-Zeit-Backend-Resolve loggt jetzt eine `warning`, wenn
-  beim Import kein Backend auflösbar ist, statt es still zu schlucken.
-- `queues/kafka.py`: Fünf Review-Befunde behoben (alle empirisch belegt,
-  jeweils erst per rot werdendem Test reproduziert):
-  - **Coverage-Theater um die Kernzusage**: Die Fake-Producer/-Consumer in
-    `tests/test_queues_kafka_unit.py` schluckten bislang die
-    Konstruktor-kwargs, ohne sie zu prüfen — eine Mutation, die
-    `enable_idempotence`/`acks="all"`/`enable_auto_commit` entfernt bzw.
-    umdreht, blieb bei 100 % Coverage grün. Neue Tests
-    (`test_get_producer_is_idempotent_with_acks_all`,
-    `test_get_consumer_uses_manual_commit_and_group_id`) assertieren jetzt
-    genau diese Werte; verifiziert, indem die Werte testweise verdreht und
-    die Suite dabei rot wurde.
-  - **Stiller Datenverlust bei doppelten `eventid`s**: `_records` war nach
-    `message.eventid` gekeyt, obwohl Duplikate by design erwartet sind
-    (heidi.cloud liefert at-least-once, deshalb dedupliziert der Consumer
-    und nicht wir). Zwei Nachrichten mit derselben `eventid` an
-    unterschiedlichen Offsets überschrieben sich gegenseitig; `ack()` der
-    ersten Kopie committete dadurch den Offset der zweiten mit und ließ
-    dazwischenliegende Nachrichten für immer unverarbeitet. Reproduziert
-    am echten Broker (Offsets 0/3 mit gleicher `eventid`, 1/2 dazwischen
-    verloren) und als Unit-Test nachgebildet
-    (`test_ack_commits_only_up_to_its_own_offset_with_duplicate_eventids`).
-    Fix: `_records` ist jetzt nach `id(message)` gekeyt, nicht mehr nach
-    `eventid`. `QueueBackend.ack()` (`protocols.py`) dokumentiert jetzt
-    explizit, dass Kafka-Commits kumulativ sind und Consumer deshalb
-    sequenziell arbeiten müssen (konsumieren → verarbeiten → acken, erst
-    dann die nächste Nachricht holen).
-  - **Race beim Kaltstart**: `_get_producer()`/`_get_consumer()` prüften
-    `if self._producer is None`, gaben dann per `await ...start()` die
-    Kontrolle ab und wiesen erst danach zu — mehrere gleichzeitige
-    `enqueue()`-Aufrufe auf kaltem Backend erzeugten dadurch je einen
-    eigenen, nie gestoppten Producer (gemessen: 5 gleichzeitige Aufrufe →
-    5 Producer, 4 verwaist). Fix: `asyncio.Lock` je Getter mit
-    Double-Checked-Locking.
-  - **`enqueue_timeout` deckte den Producer-Start nicht ab**: `wait_for`
-    umschloss nur `send_and_wait`, `_get_producer()` lief ungebremst davor
-    — gegen einen Listener, der TCP annimmt, aber nicht antwortet, wurde
-    `QueueUnavailable` erst nach 40 s statt der konfigurierten 2 s
-    geworfen. Fix: Producer-Start und Send laufen jetzt gemeinsam in einem
+- **Final review — the entry-point path was untested (IMPORTANT 1):** until this fix
+  no test suite ever wired a backend in through the real
+  `importlib.metadata.entry_points()` mechanism — all of them used `add_plugin()`. A
+  typo or rename in `plugins.ENTRY_POINT_GROUP`/`plugins.PLUGIN_NAME` therefore passed
+  CI green (verified: both constants set to nonsense on purpose, all 90 existing tests
+  stayed green). New: an `entrypoints_testing` fixture (`tests/conftest.py`, modelled
+  on `edutap.wallet_apple/tests/conftest.py`) that monkeypatches `entry_points` both in
+  `importlib.metadata` and in the already imported `plugins` module, plus
+  `EntryPointQueueBackend` (`tests/plugins.py`) and
+  `test_backend_loaded_via_real_entry_point_mechanism` (`tests/test_plugins.py`),
+  which exercises `get_queue_backend()` exclusively through the real entry-point load
+  path. Verified: with the same twisted constants exactly this one test now fails.
+- **Final review — a trailing slash lost events (IMPORTANT 2):** `POST
+  {handler_prefix}/` (with the slash) returned `307` (Starlette's `redirect_slashes`).
+  heidi.cloud does not follow redirects (the httpx default) and counts only 2xx as
+  success — a 307 would have triggered 12 retries over 48 h and then lost the event for
+  good, without our code ever logging anything (the redirect happens before the
+  handler). `handlers/fastapi.py` now registers the route with the slash as well
+  (`@router.post("/", status_code=204, include_in_schema=False)`), so both forms work
+  directly (`204`) regardless of how the consumer configures its
+  `FastAPI(redirect_slashes=...)`. The OpenAPI documentation still shows a single entry
+  (`include_in_schema=False` on the slash variant). New test
+  `test_trailing_slash_is_accepted_directly` (`tests/test_handlers_fastapi.py`), red
+  without the fix (307 instead of 204).
+- **Final review — no seam tests from endpoint to Kafka (MINOR 6):** every test so far
+  covered only its own layer (the handler only against the in-memory backend, the Kafka
+  backend only directly). New: `tests/test_integration_kafka.py`
+  (`@pytest.mark.kafka`), which walks the real path — ASGI POST (a signed event) →
+  `router` → `KafkaQueueBackend` as the registered plugin → a real broker →
+  `consume()`/`ack()`. It checks that the `payload` including nested fields
+  (`preset`/`device`) arrives unchanged, that `timestamp` is correct, and that ordering
+  per `passid` is preserved. It deliberately uses `httpx.AsyncClient`/`ASGITransport`
+  rather than `fastapi.testclient.TestClient`: outside a `with TestClient(...) as
+  client:` block, `TestClient` opens a new short-lived `anyio` portal thread with its
+  own event loop for every `.post()` call, and the lazily created aiokafka producer
+  binds to it — every later access (a second request, `consume()`/`stop()` in the test)
+  then ran on an already closed loop (`RuntimeError: Event loop is closed` at teardown,
+  a timeout on the second enqueue). `httpx.AsyncClient` instead performs the ASGI call
+  inside the running pytest-asyncio loop.
+- **Final review — the CI matrix collapsed onto one interpreter (MINOR 7):**
+  `.github/workflows/tests.yaml` called `uv venv` without `--python` — which only
+  happened to be right because each runner had exactly one managed interpreter. Fixed
+  to `uv venv --python ${{ matrix.python-version }}`.
+- **Final review — the README pointed at the outdated HANDOFF (MINOR 3):**
+  `README.md` linked twice to `docs/HANDOFF.md`, which is wrong on three points that
+  matter for LMU (there is no EPPN as the person key, only `person_id`; it recommends
+  Postgres rather than the decided Kafka; it lists wrong `state` values). The README now
+  points at the spec (`docs/superpowers/specs/2026-07-13-webhook-heidi-design.md`)
+  instead, and `docs/HANDOFF.md` now carries a notice at the top saying it is historical
+  and superseded, naming those three errors.
+- **Final review — the installation example advertised unimplemented extras
+  (MINOR 4):** `README.md` suggested `pip install "edutap.webhook-heidi[postgres]"`
+  among others, although only `[kafka]` is implemented. The installation example now
+  shows `[kafka]`, with Postgres and Redis marked explicitly as placeholders. In
+  `pyproject.toml` the stale comment on the extras ("common data format still TBD. See
+  docs/HANDOFF.md") is replaced by a description of the current state (Kafka decided and
+  implemented, Postgres/Redis placeholders).
+- **Final review — `stop()` was never called or documented (MINOR 5):**
+  `protocols.py` declares `stop()` and both backends implement it, but neither the
+  README spooler example nor any lifespan hint ever called it — with the consequence
+  that the Kafka consumer does not leave the consumer group cleanly and the rebalance
+  stalls until the session timeout. README: the spooler example gained
+  `try`/`finally: await backend.stop()`, and a new FastAPI lifespan code block calls
+  `await get_queue_backend().stop()` on shutdown.
+- `tests/conftest.py` (the `kafka_settings` fixture): the previous broker check was a
+  plain TCP connect against `localhost:9092` — on developer machines with a port
+  forward on exactly that port (VS Code, for instance) it wrongly reported "broker
+  present", and the tests then started only to fail with `KafkaConnectionError` (no
+  real Kafka protocol behind it). The check now starts a real `AIOKafkaProducer` as a
+  probe (2.5 s timeout) instead of merely checking the port. The address is
+  configurable through `EDUTAP_WEBHOOK_HEIDI_KAFKA_BOOTSTRAP_SERVERS` (still defaulting
+  to `localhost:9092`) so one can move to a free port locally without changing code.
+  New: `EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1` switches "no broker -> skip" to
+  "no broker -> `pytest.fail`" — set in `.github/workflows/tests.yaml` for the test job
+  so CI fails hard if the Kafka service container is unreachable for any reason, rather
+  than staying quietly (and possibly permanently) green.
+- `tests/test_queues_kafka_unit.py` (new): unit tests for `KafkaQueueBackend` against
+  fake producers and consumers, without a broker dependency — covering
+  `_get_producer`/`_get_consumer` (including caching), `enqueue` (success and timeout),
+  the `consume`/`ack` round trip and `stop()`, all of which were previously reachable
+  only through the `@pytest.mark.kafka` tests and therefore only with a running broker.
+  The reason: `queues/kafka.py` is the only production queue backend and has to be
+  measured in full regardless of whether a broker happens to run — otherwise coverage
+  locally (without a broker) falls below the 90 % gate although CI (with a broker) would
+  be green. The existing `@pytest.mark.kafka` integration tests remain unchanged and
+  were verified against a real local broker (a lossless round trip including
+  `timestamp`/`payload`, `passid` as the partition key, `QueueUnavailable` both for an
+  unreachable broker and for an enqueue timeout).
+- `signing.verify`: non-ASCII characters in a forged `Heidi-Signature` header
+  previously raised an unhandled `TypeError` inside `hmac.compare_digest` (Starlette
+  decodes headers as latin-1), turning a 401 into a 500. The comparison now runs over
+  the decoded digest bytes (`bytes.fromhex`) rather than header strings; invalid hex
+  yields `False`. In addition an empty secret is rejected, and the timestamp has to be
+  a pure digit string (no `+` prefix, no `_` separators).
+- `handlers/fastapi.py`: two paths previously led to a 500 rather than a 503 — no
+  backend registered (`get_queue_backend()` raises `NotImplementedError`) and a backend
+  that raises something other than `QueueUnavailable` (`ConnectionResetError`,
+  `asyncio.TimeoutError`). The enqueue path now catches `Exception` broadly and always
+  answers 503 — a 500 would be identical to a 503 for heidi.cloud (both non-2xx, both
+  triggering up to 12 retries over 48 h) but produces needless stack traces and alerts.
+  In addition the backend is resolved on module import as a probe (fail fast in
+  production, where the entry point is statically present) without breaking the import
+  if it is still missing there.
+- `handlers/fastapi.py`: `await request.body()` buffers the whole body in memory before
+  anything has been checked — an unauthenticated memory DoS. The endpoint now checks
+  `Content-Length` against `settings.max_body_bytes` before reading the body (413
+  without reading); if the header is missing or wrong, the length is checked after
+  reading (413 when exceeded).
+- `handlers/fastapi.py`: the `Content-Length` pre-check does not help when the header
+  is absent (chunked transfer encoding without it, for instance) — `await
+  request.body()` then still buffers without limit before the size check applies. The
+  body is now read incrementally through a new `_read_body_limited()` using
+  `request.stream()` and aborts with a 413 the moment `max_body_bytes` is exceeded,
+  rather than buffering the rest.
+- `handlers/fastapi.py`: the 400 log on envelope parsing logged `str(exc)` of a pydantic
+  `ValidationError` — which embeds the validated input value (the matriculation number
+  in `person_id` at LMU, for example) and thus ended up at INFO level unintentionally.
+  Only `exc.error_count()` and the error locations (`e["loc"]` per error) are logged
+  now, never a value.
+- `handlers/fastapi.py`: `logger.error(...)` in the generic enqueue failure path
+  replaced by `logger.exception(...)` so the traceback survives.
+  `QueueMessage.from_event(event)` moved out of the `try` block, so that a model error
+  there is not misreported as a 503 rather than the bug it is. The import-time backend
+  resolution now logs a `warning` when no backend can be resolved at import, instead of
+  swallowing it silently.
+- `queues/kafka.py`: five review findings fixed, each of them evidenced and first
+  reproduced by a failing test:
+  - **Coverage theatre around the core promise**: the fake producers and consumers in
+    `tests/test_queues_kafka_unit.py` swallowed the constructor kwargs without checking
+    them — a mutation removing or inverting
+    `enable_idempotence`/`acks="all"`/`enable_auto_commit` stayed green at 100 %
+    coverage. New tests (`test_get_producer_is_idempotent_with_acks_all`,
+    `test_get_consumer_uses_manual_commit_and_group_id`) now assert exactly those
+    values; verified by twisting the values on purpose and watching the suite go red.
+  - **Silent data loss on duplicate `eventid`s**: `_records` was keyed by
+    `message.eventid`, although duplicates are expected by design (heidi.cloud delivers
+    at-least-once, which is why the consumer deduplicates and we do not). Two messages
+    with the same `eventid` at different offsets overwrote each other; acking the first
+    copy then committed the offset of the second as well and left the messages in
+    between unprocessed for ever. Reproduced against a real broker (offsets 0 and 3 with
+    the same `eventid`, 1 and 2 lost in between) and rebuilt as a unit test
+    (`test_ack_commits_only_up_to_its_own_offset_with_duplicate_eventids`). Fix:
+    `_records` is now keyed by `id(message)` rather than `eventid`.
+    `QueueBackend.ack()` (`protocols.py`) now documents explicitly that Kafka commits
+    are cumulative and that consumers therefore have to work sequentially (consume →
+    process → ack, and only then fetch the next message).
+  - **A race on cold start**: `_get_producer()`/`_get_consumer()` checked `if
+    self._producer is None`, then yielded control at `await ...start()` and assigned
+    only afterwards — several concurrent `enqueue()` calls on a cold backend therefore
+    each created their own producer that was never stopped (measured: 5 concurrent calls
+    → 5 producers, 4 of them orphaned). Fix: an `asyncio.Lock` per getter with
+    double-checked locking.
+  - **`enqueue_timeout` did not cover the producer start**: `wait_for` only wrapped
+    `send_and_wait` while `_get_producer()` ran ahead of it unbounded — against a
+    listener that accepts TCP but never answers, `QueueUnavailable` was raised after
+    40 s rather than the configured 2 s. Fix: producer start and send now run inside one
     `wait_for`.
-  - **Leere Fehlermeldung bei Timeout**: `str(asyncio.TimeoutError())` ist
-    `""`, `QueueUnavailable(str(exc))` war dadurch inhaltslos. Wirft jetzt
-    `f"Enqueue-Timeout nach {timeout}s"` (bzw. bei `KafkaError` den
-    Exception-Klassennamen mit Meldung), jeweils mit `from exc`.
-- `tests/conftest.py`: Der Kafka-Broker-Probe war ein einmaliger 2,5-s-
-  Versuch ohne Retry; der CI-Service-Container in
-  `.github/workflows/tests.yaml` hat keinen eigenen Healthcheck. Mit
-  `EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1` konnte ein Broker, der beim
-  ersten Testlauf noch hochfährt, dadurch einen harten, flakigen CI-Fail
-  auslösen. Neu: `_wait_for_kafka_broker()` pollt bis zu 30 s in 2-s-
-  Schritten, aber nur im `TEST_REQUIRE_KAFKA`-Pfad — lokal ohne
-  absichtlich laufenden Broker bleibt der schnelle Einzelversuch, damit
-  der Skip-Hinweis nicht künstlich verzögert wird.
-- `queues/kafka.py`: Regression aus dem vorigen Fix (`enqueue_timeout`
-  umschließt jetzt den Producer-Start) behoben — `asyncio.wait_for`
-  bricht `_get_producer()` dabei per `CancelledError` MITTEN in
-  `await producer.start()` ab. Die lokale `producer`-Variable ging dabei
-  verloren, `self._producer` blieb `None`: der halb gestartete Producer
-  (offener Socket + Hintergrundtasks) war damit für niemanden mehr
-  erreichbar, auch nicht für `stop()`. Gemessen gegen einen hängenden
-  Broker: linearer Leak, ein offener Socket pro abgebrochenem
-  `enqueue()`, nie freigegeben. Fix: `_get_producer()` fängt jetzt auch
-  `BaseException` (explizit inkl. `CancelledError`, das seit Python 3.8
-  nicht mehr von `Exception` erbt) und stoppt den halb gestarteten
-  Producer, bevor die Exception weiterfliegt. `_get_consumer()` bekommt
-  denselben Fix (gleiches Double-Checked-Locking-Muster, gleiche
-  Abbruchgefahr z. B. beim Herunterfahren des Spooler-Tasks). Reproduziert
-  in `test_repeated_enqueue_timeout_during_producer_start_does_not_leak`
-  (5x `enqueue()` gegen einen hängenden Fake-Producer, war ohne den Fix
-  rot: Socket-Zähler wuchs linear) und
-  `test_get_consumer_stops_half_started_consumer_on_cancel`.
-- `protocols.py`/`queues/kafka.py`: Die Identitätsregel für `ack()`
-  (`id(message)` erfordert dasselbe Objekt, das `consume()` geliefert
-  hat) stand bisher nur im Docstring von `kafka.py`, nicht im Protocol —
-  dem eigentlichen Vertrag, gegen den LMU programmiert. Jetzt auch in
-  `QueueBackend.ack()` (`protocols.py`) dokumentiert. Zusätzlich: `ack()`
-  eines unbekannten Nachrichtenobjekts (z. B. weil der Aufrufer die
-  Nachricht kopiert/neu erzeugt hat statt das Original zu acken) schluckte
-  das bisher still — kein Commit, keine Exception, kein Log, eine
-  Redelivery-Endlosschleife ohne jeden Hinweis. `ack()` loggt diesen Fall
-  jetzt als `warning` (Modul-Logger). Test umbenannt
-  (`test_ack_unknown_eventid_is_a_noop` →
-  `test_ack_unknown_message_warns_and_does_not_commit`) und um die
-  `caplog`-Assertion erweitert.
+  - **An empty error message on timeout**: `str(asyncio.TimeoutError())` is `""`, which
+    made `QueueUnavailable(str(exc))` say nothing. It now raises `f"Enqueue timeout
+    after {timeout}s"` (or, for a `KafkaError`, the exception class name with its
+    message), each with `from exc`.
+- `tests/conftest.py`: the Kafka broker probe was a single 2.5 s attempt without retry,
+  and the CI service container in `.github/workflows/tests.yaml` has no health check of
+  its own. With `EDUTAP_WEBHOOK_HEIDI_TEST_REQUIRE_KAFKA=1` a broker still starting up
+  during the first test run could therefore cause a hard, flaky CI failure. New:
+  `_wait_for_kafka_broker()` polls for up to 30 s in 2 s steps, but only on the
+  `TEST_REQUIRE_KAFKA` path — locally, without a deliberately running broker, the fast
+  single attempt remains so the skip notice is not delayed artificially.
+- `queues/kafka.py`: a regression from the previous fix (`enqueue_timeout` now wrapping
+  the producer start) fixed — `asyncio.wait_for` aborts `_get_producer()` with a
+  `CancelledError` in the middle of `await producer.start()`. The local `producer`
+  variable was lost in the process and `self._producer` stayed `None`: the half-started
+  producer (an open socket plus background tasks) was then unreachable for anyone,
+  including `stop()`. Measured against a hanging broker: a linear leak, one open socket
+  per aborted `enqueue()`, never released. Fix: `_get_producer()` now also catches
+  `BaseException` (explicitly including `CancelledError`, which no longer inherits from
+  `Exception` as of Python 3.8) and stops the half-started producer before re-raising.
+  `_get_consumer()` gets the same fix (same double-checked locking pattern, same risk of
+  being cancelled, for example while the spooler task shuts down). Reproduced in
+  `test_repeated_enqueue_timeout_during_producer_start_does_not_leak` (5 `enqueue()`
+  calls against a hanging fake producer, red without the fix: the socket counter grew
+  linearly) and `test_get_consumer_stops_half_started_consumer_on_cancel`.
+- `protocols.py`/`queues/kafka.py`: the identity rule for `ack()` (`id(message)`
+  requires the very object `consume()` returned) lived only in the docstring of
+  `kafka.py`, not in the protocol — the actual contract LMU programs against. It is now
+  documented in `QueueBackend.ack()` (`protocols.py`) as well. In addition, acking an
+  unknown message object (because the caller copied or recreated the message rather than
+  acking the original) used to be swallowed silently — no commit, no exception, no log,
+  an endless redelivery loop without any hint. `ack()` now logs that case as a `warning`
+  (module logger). The test was renamed (`test_ack_unknown_eventid_is_a_noop` →
+  `test_ack_unknown_message_warns_and_does_not_commit`) and extended with a `caplog`
+  assertion.
