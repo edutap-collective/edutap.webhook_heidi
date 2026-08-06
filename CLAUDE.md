@@ -51,6 +51,14 @@ by our own testing or through insider knowledge, and the three are not
 interchangeable:
 
 * **Documented** — public source, linked. May be written as fact.
+* **Verified, not citable** — obtained by a person from an access-protected area and
+  checked there; the reference is recorded internally but must not be published; and
+  the statement has been reduced to what is not confidential. May be written as fact,
+  carrying this label. It is the rule journalism uses for source protection: the claim
+  stands, we know where it comes from, the reader does not get the source.
+
+  The four conditions hold together. A statement for which nobody can name the
+  internal reference does not fall here — that is insider knowledge.
 * **Measured** — established by our own tests. May be written down, but always marked
   as such, because it describes what a platform did on the day we looked, not what it
   guarantees. It can change with the next release, without notice and without an
