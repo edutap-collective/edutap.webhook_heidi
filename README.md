@@ -36,9 +36,9 @@ pip install "edutap.webhook-heidi[kafka]"
 # [postgres] / [redis] are placeholder extras only — no backend behind them yet.
 ```
 
-## Verwendung
+## Usage
 
-### Webhook einbinden
+### Wiring up the webhook
 
 ```python
 from edutap.webhook_heidi.handlers.fastapi import router
@@ -48,12 +48,12 @@ app = FastAPI()
 app.include_router(router)
 ```
 
-> **Sauberes Shutdown.** `QueueBackend.stop()` (`protocols.py`) fährt
-> Producer/Consumer sauber herunter — bei Kafka verlässt der Consumer damit
-> ordentlich die Consumer-Group, statt bis zum Session-Timeout zu hängen und
-> ein Rebalance zu blockieren. Ruft niemand `stop()` auf, passiert das nicht
-> automatisch. Für den Webhook (Producer-Seite) deshalb per FastAPI-Lifespan
-> beim Shutdown aufrufen:
+> **Shutting down cleanly.** `QueueBackend.stop()` (`protocols.py`) shuts the
+> producer and consumer down properly — with Kafka the consumer then leaves the
+> consumer group in an orderly fashion instead of hanging until the session
+> timeout and blocking a rebalance. If nobody calls `stop()`, that does not
+> happen by itself. For the webhook (the producer side) call it from the FastAPI
+> lifespan on shutdown:
 >
 > ```python
 > from contextlib import asynccontextmanager
@@ -72,43 +72,42 @@ app.include_router(router)
 > app.include_router(router)
 > ```
 
-Konfiguration ausschließlich über Umgebungsvariablen (Prefix
-`EDUTAP_WEBHOOK_HEIDI_`) bzw. `.env`:
+Configuration is environment-only (prefix `EDUTAP_WEBHOOK_HEIDI_`) or `.env`:
 
 ```bash
-# Pflicht
-EDUTAP_WEBHOOK_HEIDI_WEBHOOK_SECRET=<Secret aus der heidi.cloud-Admin-UI>
+# Required
+EDUTAP_WEBHOOK_HEIDI_WEBHOOK_SECRET=<secret from the heidi.cloud admin UI>
 
-# Optional, mit Defaults aus settings.py
+# Optional, defaults live in settings.py
 EDUTAP_WEBHOOK_HEIDI_HANDLER_PREFIX=/webhook/heidi
 EDUTAP_WEBHOOK_HEIDI_SIGNATURE_TOLERANCE_SECONDS=300
-EDUTAP_WEBHOOK_HEIDI_MAX_BODY_BYTES=1048576       # 1 MiB; siehe Warnung unten
-EDUTAP_WEBHOOK_HEIDI_ENQUEUE_TIMEOUT=10.0         # muss deutlich unter dem 30s-Sender-Timeout bleiben
+EDUTAP_WEBHOOK_HEIDI_MAX_BODY_BYTES=1048576       # 1 MiB; see the warning below
+EDUTAP_WEBHOOK_HEIDI_ENQUEUE_TIMEOUT=10.0         # must stay well below the sender's 30s timeout
 
-# Kafka-Backend (Extra [kafka])
+# Kafka backend (the [kafka] extra)
 EDUTAP_WEBHOOK_HEIDI_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 EDUTAP_WEBHOOK_HEIDI_KAFKA_TOPIC=heidi.pass-events
 EDUTAP_WEBHOOK_HEIDI_KAFKA_CONSUMER_GROUP=heidi-pass-spooler
-EDUTAP_WEBHOOK_HEIDI_KAFKA_SECURITY_PROTOCOL=PLAINTEXT   # z.B. SASL_SSL im Produktivbetrieb
-EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_MECHANISM=PLAIN           # optional, nur mit SASL
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SECURITY_PROTOCOL=PLAINTEXT   # e.g. SASL_SSL in production
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_MECHANISM=PLAIN           # optional, only with SASL
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_USERNAME=<user>            # optional
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_PASSWORD=<password>        # optional
 ```
 
-> `EDUTAP_WEBHOOK_HEIDI_MAX_BODY_BYTES` nicht ohne Grund verkleinern:
-> heidi.cloud wiederholt JEDES Non-2xx (auch 413) bis zu 12x über 48 h — ein
-> zu knapp gewähltes Limit lässt legitime, nur etwas größere Events innerhalb
-> dieses Fensters endgültig ins Leere laufen.
+> Do not lower `EDUTAP_WEBHOOK_HEIDI_MAX_BODY_BYTES` without a reason:
+> heidi.cloud retries EVERY non-2xx (including 413) up to 12 times over 48 h — a
+> limit chosen too tightly lets legitimate, merely slightly larger events run out
+> of retries and be lost for good.
 
-Das Kafka-Backend wird per Entry-Point ausgewählt — in der `pyproject.toml` der
-Consumer-Anwendung:
+The Kafka backend is selected through an entry point, declared in the consuming
+application's `pyproject.toml`:
 
 ```toml
 [project.entry-points.'edutap.webhook_heidi.plugins']
 QueueBackend = 'edutap.webhook_heidi.queues.kafka:KafkaQueueBackend'
 ```
 
-### Queue lesen (Spooler)
+### Reading the queue (spooler)
 
 ```python
 from edutap.webhook_heidi.plugins import get_queue_backend
@@ -116,59 +115,51 @@ from edutap.webhook_heidi.plugins import get_queue_backend
 backend = get_queue_backend()
 try:
     async for message in backend.consume():
-        if already_seen(message.eventid):   # <- Pflicht, siehe unten
+        if already_seen(message.eventid):   # <- mandatory, see below
             await backend.ack(message)
             continue
-        handle(message)                     # eigene Logik
-        await backend.ack(message)          # dasselbe `message`-Objekt, siehe unten
+        handle(message)                     # your own logic
+        await backend.ack(message)          # the same `message` object, see below
 finally:
-    await backend.stop()   # verlässt die Kafka-Consumer-Group sauber, siehe unten
+    await backend.stop()   # leaves the Kafka consumer group cleanly, see below
 ```
 
-> **`stop()` nicht vergessen.** Ohne `await backend.stop()` beim Beenden des
-> Spooler-Tasks (z. B. bei Shutdown/Neustart) verlässt der Kafka-Consumer die
-> Consumer-Group nicht sauber — das Rebalance hängt dann bis zum
-> Session-Timeout. `try`/`finally` stellt sicher, dass `stop()` auch bei
-> einer Exception in `handle()` noch läuft.
+> **Do not forget `stop()`.** Without `await backend.stop()` when the spooler task
+> ends (on shutdown or restart, say), the Kafka consumer does not leave the
+> consumer group cleanly and the rebalance stalls until the session timeout.
+> `try`/`finally` makes sure `stop()` still runs when `handle()` raises.
 
-> **Deduplizieren ist Pflicht.** heidi.cloud liefert **at-least-once** (bis zu
-> 12 Versuche über 48 h), und Kafka kann beim Schreiben nicht deduplizieren.
-> Dieselbe `eventid` kann also mehrfach ankommen. Die `eventid` mindestens
-> 48 h vorhalten — besser 28 Tage, dann sind auch manuelle Redeliveries aus
-> der heidi.cloud-Admin-UI abgedeckt.
+> **Deduplication is mandatory.** heidi.cloud delivers **at-least-once** (up to 12
+> attempts over 48 h), and Kafka cannot deduplicate on write. The same `eventid`
+> can therefore arrive more than once. Keep every `eventid` for at least 48 h —
+> better 28 days, which also covers manual redeliveries from the heidi.cloud
+> admin UI.
 
-> **`ack()` muss sequenziell erfolgen.** Kafka-Offset-Commits sind kumulativ
-> — es gibt kein „committe nur diese eine Nachricht". Ein Consumer MUSS daher
-> konsumieren → verarbeiten → acken, erst danach die nächste Nachricht aus
-> `consume()` holen. Wer Nachrichten stapelt und außer der Reihe (oder
-> unvollständig) ackt, committet dabei stillschweigend auch die
-> dazwischenliegenden Offsets mit — diese Nachrichten gelten dann als
-> verarbeitet, obwohl sie es nie waren.
+> **`ack()` has to be sequential.** Kafka offset commits are cumulative — there is
+> no "commit only this one message". A consumer MUST therefore consume → process →
+> ack, and only then take the next message from `consume()`. Batching messages and
+> acking out of order (or incompletely) silently commits the offsets in between as
+> well; those messages then count as processed although they never were.
 
-> **`ack()` braucht dasselbe Objekt, das `consume()` geliefert hat** — der
-> Offset wird intern über die Objekt-Identität (`id(message)`) gefunden,
-> nicht über `eventid` oder sonstige Gleichheit. Wer die Nachricht kopiert
-> oder z. B. durch eine eigene Queue schickt
-> (`QueueMessage.model_validate(m.model_dump())`) und dann die Kopie ackt,
-> committet dadurch **nichts** — ohne Exception. Ergebnis ist eine
-> Redelivery-Endlosschleife. Das Kafka-Backend loggt diesen Fall inzwischen
-> als `warning`, darauf sollte man sich aber nicht verlassen: die Nachricht
-> muss bis zum `ack()`-Aufruf referenziert bleiben, nicht re-serialisiert
-> werden.
+> **`ack()` needs the very object `consume()` returned.** The offset is looked up
+> by object identity (`id(message)`), not by `eventid` or any other notion of
+> equality. Copying the message or passing it through a queue of your own
+> (`QueueMessage.model_validate(m.model_dump())`) and acking the copy commits
+> **nothing** — without raising. The result is an endless redelivery loop. The
+> Kafka backend now logs this case as a `warning`, but do not rely on that: the
+> message has to stay referenced until `ack()` is called, not be re-serialised.
 
-### Betrieb
+### Operations
 
-- **Reihenfolge:** Nachrichten mit derselben `passid` landen in derselben
-  Kafka-Partition und kommen damit in Sendereihenfolge an. Über Pässe hinweg
-  gibt es **keine** Ordnungsgarantie — nach `timestamp` sortieren, nicht nach
-  Ankunftszeit.
-- **Secret-Rotation:** heidi.cloud rotiert das Webhook-Secret ohne
-  Überlappungsfenster. Bei einem Mismatch antwortet der Endpoint mit 401, der
-  Sender wiederholt bis zu 12x über 48 h — ein Deployment mit dem neuen
-  Secret innerhalb dieser Frist kostet kein Event.
-- **HTTPS ist Pflicht:** Die HMAC-Signatur schützt vor Manipulation des
-  Payloads, aber nicht vor Mitlesen. Der Payload enthält `person_id` und
-  `pass_id` — den Endpoint deshalb nur über HTTPS betreiben.
+- **Ordering:** messages carrying the same `passid` land in the same Kafka
+  partition and therefore arrive in the order they were sent. Across passes there
+  is **no** ordering guarantee — sort by `timestamp`, not by arrival time.
+- **Secret rotation:** heidi.cloud rotates the webhook secret without an overlap
+  window. On a mismatch the endpoint answers 401 and the sender retries up to 12
+  times over 48 h — deploying the new secret inside that window costs no events.
+- **HTTPS is mandatory:** the HMAC signature protects the payload from tampering,
+  not from being read. The payload carries `person_id` and `pass_id`, so run the
+  endpoint over HTTPS only.
 
 ## Development
 
