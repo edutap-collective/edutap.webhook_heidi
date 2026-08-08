@@ -36,7 +36,13 @@ ARG HTTP_PORT=8091
 ENV HTTP_PORT=${HTTP_PORT}
 EXPOSE ${HTTP_PORT}
 
+# `exec`, so that uvicorn replaces the shell and becomes PID 1. Without it the
+# shell stays PID 1, does not forward SIGTERM, and `docker stop` waits out its
+# grace period before killing the container -- measured: 10s and no graceful
+# shutdown at all, which would skip the lifespan and leave the Kafka producer
+# to be torn down mid-flight. The shell is still needed for `$HTTP_PORT`.
+#
 # --proxy-headers: the service always runs behind a reverse proxy, and the
 # signature check does not depend on the client address, but the access log
 # should show the real one.
-CMD ["sh", "-c", "uvicorn edutap.webhook_heidi.standalone:app --proxy-headers --host 0.0.0.0 --port $HTTP_PORT"]
+CMD ["sh", "-c", "exec uvicorn edutap.webhook_heidi.standalone:app --proxy-headers --host 0.0.0.0 --port $HTTP_PORT"]
