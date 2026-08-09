@@ -1,0 +1,17 @@
+# Only pyproject.toml, README.md and src/ are copied into the build stage; the
+# rest is kept out of the build context so that a change to the tests or the
+# docs does not invalidate the layer cache.
+.git
+.github
+.venv
+docs
+tests
+mutants
+*.md
+!README.md
+.env
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
