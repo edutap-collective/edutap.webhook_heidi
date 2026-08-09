@@ -22,8 +22,6 @@
 
   import hashlib
   import time
-
-
   ```
   Im Zweifel `uvx ruff check --fix . && uvx ruff format .` laufen lassen — das ist die Autorität.
 - **`print()` ist verboten** (ruff `T20`), außer in Tests.
@@ -214,7 +212,10 @@ INSTALLED = {
         "person_id": "12345",
         "template_id": "0c0ffee0-0000-0000-0000-000000000002",
         "template_title": "Student ID 2026",
-        "preset": {"uuid": "0c0ffee0-0000-0000-0000-000000000003", "title": "Student ID"},
+        "preset": {
+            "uuid": "0c0ffee0-0000-0000-0000-000000000003",
+            "title": "Student ID",
+        },
         "wallet_type": "APPLE_ACCESS",
         "state": "ACTIVE",
         "reason": "provisioning",
@@ -239,15 +240,24 @@ def test_unknown_type_is_accepted():
 
 
 def test_unknown_reason_and_new_fields_are_accepted():
-    payload = {**INSTALLED, "data": {**INSTALLED["data"], "reason": "brandneu", "future": 42}}
+    payload = {
+        **INSTALLED,
+        "data": {**INSTALLED["data"], "reason": "brandneu", "future": 42},
+    }
     event = WebhookEvent.model_validate(payload)
     assert event.data.reason == "brandneu"
 
 
 def test_empty_error_category_is_accepted():
     """Apple-Access-Fehler liefern category="" (leerer String, nicht null)."""
-    payload = {**INSTALLED, "data": {**INSTALLED["data"], "error": {"category": "", "message": ""}}}
-    assert WebhookEvent.model_validate(payload).data.error == {"category": "", "message": ""}
+    payload = {
+        **INSTALLED,
+        "data": {**INSTALLED["data"], "error": {"category": "", "message": ""}},
+    }
+    assert WebhookEvent.model_validate(payload).data.error == {
+        "category": "",
+        "message": "",
+    }
 
 
 def test_missing_pass_id_is_rejected():
@@ -457,7 +467,14 @@ def test_timestamp_within_tolerance():
 
 
 def test_malformed_headers():
-    for header in ("", "garbage", "t=abc,v1=x", "v1=x,t=1", f"t={NOW}", f"t={NOW};v1=x"):
+    for header in (
+        "",
+        "garbage",
+        "t=abc,v1=x",
+        "v1=x,t=1",
+        f"t={NOW}",
+        f"t={NOW};v1=x",
+    ):
         assert verify(SECRET, header, BODY, now=NOW) is False
 
 
@@ -469,12 +486,18 @@ def test_retry_bytes_verify_independently():
     Versuch neu signiert. Wer gegen re-serialisiertes JSON prüft statt gegen die
     Raw Bytes, besteht den Erstversuch und scheitert am Retry.
     """
-    event = {"type": "pass.installed", "id": "evt_1", "data": {"pass_id": "p", "person_id": "x"}}
+    event = {
+        "type": "pass.installed",
+        "id": "evt_1",
+        "data": {"pass_id": "p", "person_id": "x"},
+    }
     first_attempt = json.dumps(event).encode()
     retry = json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
     assert first_attempt != retry
 
-    assert verify(SECRET, sign(SECRET, NOW, first_attempt), first_attempt, now=NOW) is True
+    assert (
+        verify(SECRET, sign(SECRET, NOW, first_attempt), first_attempt, now=NOW) is True
+    )
     assert verify(SECRET, sign(SECRET, NOW, retry), retry, now=NOW) is True
     # Signatur des einen Byte-Strings gilt NICHT für den anderen:
     assert verify(SECRET, sign(SECRET, NOW, first_attempt), retry, now=NOW) is False
@@ -958,7 +981,13 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def _post(client: TestClient, body: bytes, *, secret: str = TEST_SECRET, now: int | None = None):
+def _post(
+    client: TestClient,
+    body: bytes,
+    *,
+    secret: str = TEST_SECRET,
+    now: int | None = None,
+):
     timestamp = int(time.time()) if now is None else now
     return client.post(
         PATH,
@@ -1146,7 +1175,9 @@ async def handle_pass_event(request: Request) -> Response:
     try:
         event = WebhookEvent.model_validate_json(body)
     except pydantic.ValidationError as exc:
-        raise HTTPException(status_code=400, detail="Malformed event envelope.") from exc
+        raise HTTPException(
+            status_code=400, detail="Malformed event envelope."
+        ) from exc
 
     if event.type == WEBHOOK_TEST:
         return Response(status_code=200)
