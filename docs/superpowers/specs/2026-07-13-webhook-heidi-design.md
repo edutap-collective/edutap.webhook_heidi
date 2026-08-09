@@ -254,6 +254,7 @@ Hauskonvention von `edutap.wallet_google` / `wallet_apple`.
 ```python
 ENV_PREFIX = "EDUTAP_WEBHOOK_HEIDI_"
 
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=ENV_PREFIX,
@@ -267,7 +268,7 @@ class Settings(BaseSettings):
     handler_prefix: str = "/webhook/heidi"
 
     # Signaturprüfung (Sender-Vertrag, §2.2)
-    webhook_secret: SecretStr                    # aus der heidi.cloud-Admin-UI
+    webhook_secret: SecretStr  # aus der heidi.cloud-Admin-UI
     signature_tolerance_seconds: int = 300
 
     # Enqueue — muss deutlich unter dem 30-s-Timeout des Senders bleiben
@@ -277,7 +278,7 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_topic: str = "heidi.pass-events"
     kafka_consumer_group: str = "heidi-pass-spooler"
-    kafka_security_protocol: str = "PLAINTEXT"   # im LRZ vermutlich SASL_SSL
+    kafka_security_protocol: str = "PLAINTEXT"  # im LRZ vermutlich SASL_SSL
     kafka_sasl_mechanism: str | None = None
     kafka_sasl_username: str | None = None
     kafka_sasl_password: SecretStr | None = None
@@ -295,12 +296,12 @@ können.
 
 ```python
 class QueueMessage(BaseModel):
-    eventid: str            # evt_… — Dedup-Key
-    passid: str             # data.pass_id
-    personid: str           # data.person_id
-    action: str             # type — "pass.installed" | …
-    timestamp: datetime     # created (nicht die Ankunftszeit)
-    payload: dict           # data, vollständig und unverändert
+    eventid: str  # evt_… — Dedup-Key
+    passid: str  # data.pass_id
+    personid: str  # data.person_id
+    action: str  # type — "pass.installed" | …
+    timestamp: datetime  # created (nicht die Ankunftszeit)
+    payload: dict  # data, vollständig und unverändert
 ```
 
 `payload` enthält `data` **unverändert** — also auch `state`, `reason`,
@@ -390,7 +391,7 @@ Der Consumer (LMUs `HeidiWebhookSpooler`) sieht ausschließlich das Protocol:
 ```python
 backend = get_queue_backend()
 async for message in backend.consume():
-    handle(message)          # consumer-eigene Logik
+    handle(message)  # consumer-eigene Logik
     await backend.ack(message)
 ```
 

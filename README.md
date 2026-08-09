@@ -115,13 +115,13 @@ from edutap.webhook_heidi.plugins import get_queue_backend
 backend = get_queue_backend()
 try:
     async for message in backend.consume():
-        if already_seen(message.eventid):   # <- mandatory, see below
+        if already_seen(message.eventid):  # <- mandatory, see below
             await backend.ack(message)
             continue
-        handle(message)                     # your own logic
-        await backend.ack(message)          # the same `message` object, see below
+        handle(message)  # your own logic
+        await backend.ack(message)  # the same `message` object, see below
 finally:
-    await backend.stop()   # leaves the Kafka consumer group cleanly, see below
+    await backend.stop()  # leaves the Kafka consumer group cleanly, see below
 ```
 
 > **Do not forget `stop()`.** Without `await backend.stop()` when the spooler task
