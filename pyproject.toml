@@ -32,6 +32,13 @@ dependencies = [
     "fastapi",
     "pydantic>=2.0",
     "pydantic-settings",
+    # The log calls in the library are structlog calls, so structlog is a core
+    # dependency while edutap.observability_settings (which CONFIGURES it, along
+    # with Sentry and OTLP) is an extra. structlog is pure Python and works
+    # unconfigured, so a consumer that never configures it still gets output --
+    # whereas stdlib logging would have left these lines outside the JSON and
+    # outside the trace that the eduTAP estate reads its services through.
+    "structlog>=25",
 ]
 
 [project.urls]
@@ -48,6 +55,14 @@ Documentation = "https://docs.edutap.eu/packages/edutap_webhook_heidi/index.html
 postgres = ["psycopg[binary,pool]>=3.1"]
 kafka = ["aiokafka>=0.10"]
 redis = ["redis>=5.0"]
+# The standalone deployment shape (standalone.py + Dockerfile). Error reporting,
+# tracing and structured logging as every eduTAP service wires them.
+#
+# An extra and not a core dependency: it pulls logfire and sentry-sdk, and a
+# consumer that only mounts the router configures its own observability -- it
+# should not inherit two backends it never asked for. The library itself needs
+# nothing from it; structlog alone carries the log calls.
+observability = ["edutap.observability_settings>=0.1.3,<0.2"]
 test = [
     "pytest",
     "pytest-asyncio",

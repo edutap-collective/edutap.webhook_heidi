@@ -20,7 +20,11 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
 # [kafka] is the only implemented backend, and standalone.py registers exactly
 # it — installing the package without the extra would yield an image whose
 # every request ends in 503.
-RUN pip install --no-cache-dir ".[kafka]" uvicorn
+# [observability] alongside [kafka]: standalone.py calls install_observability(),
+# so without the extra the image fails at import — deliberately, rather than
+# running a service the estate cannot see. It is what gives the container log its
+# JSON lines and the spans their trace ids.
+RUN pip install --no-cache-dir ".[kafka,observability]" uvicorn
 
 FROM python:3.13-slim
 # The interpreter of the base image is 3.13, so this is where `pip install` put

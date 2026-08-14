@@ -17,6 +17,7 @@ from edutap.webhook_heidi.protocols import QueueUnavailable
 from edutap.webhook_heidi.queues import kafka as kafka_module
 from edutap.webhook_heidi.queues.kafka import KafkaQueueBackend
 from edutap.webhook_heidi.settings import Settings
+from structlog.testing import capture_logs
 from typing import ClassVar
 
 import asyncio
@@ -398,7 +399,7 @@ async def test_consume_and_ack_roundtrip(monkeypatch):
     assert consumer.commits == [{(record.topic, record.partition): 42}]
 
 
-async def test_ack_unknown_message_warns_and_does_not_commit(caplog):
+async def test_ack_unknown_message_warns_and_does_not_commit():
     """Die id(message)-Identitätsregel (siehe ack()-Docstring in
     protocols.py/kafka.py) bricht STILL, wenn ein Consumer die Nachricht vor
     dem ack() kopiert/neu erzeugt hat (z.B.
@@ -407,12 +408,12 @@ async def test_ack_unknown_message_warns_and_does_not_commit(caplog):
     muss diesen Fall deshalb mindestens loggen."""
     backend = KafkaQueueBackend(_settings())
     # Kein consume() vorher: _records ist leer, kein Consumer gestartet.
-    with caplog.at_level("WARNING", logger="edutap.webhook_heidi.queues.kafka"):
+    with capture_logs() as logs:
         await backend.ack(_message(eventid="never-seen"))
 
     assert any(
-        "never-seen" in record.getMessage() and "ack" in record.getMessage().lower()
-        for record in caplog.records
+        entry.get("eventid") == "never-seen" and "ack()" in entry["event"]
+        for entry in logs
     )
 
 
