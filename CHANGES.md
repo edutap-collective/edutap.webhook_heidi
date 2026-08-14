@@ -75,6 +75,18 @@ All notable changes to this project are documented here.
   does" section is corrected: Kafka is implemented, Postgres and Redis are placeholder
   extras in `pyproject.toml` only. Every code example was verified against the actual
   import paths, function names and environment variable names.
+- The standalone deployment shape is published as a container image
+  (`.github/workflows/docker-publish.yml`, image
+  `ghcr.io/<owner>/edutap.webhook_heidi`). `release.yaml` publishes the package to
+  PyPI, which serves the consumers that embed the router — it does nothing for the
+  deployment that runs the webhook on its own, and a deployment pulling the `:latest`
+  tag had nothing to pull. The workflow mirrors the one in the sibling services
+  (`edutap.data_provider`, `edutap.pass_builder`) with one addition they do not need:
+  `.git` is excluded from the build context, so hatch-vcs cannot derive a version
+  inside the image build. The version is therefore derived in the workflow, where the
+  checkout still has its tags, and handed to the build as
+  `SETUPTOOLS_SCM_PRETEND_VERSION` — without it the image would report the
+  `0.0.0.dev0` fallback of the `Dockerfile`.
 
 ### Fixes
 
