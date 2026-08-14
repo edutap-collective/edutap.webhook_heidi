@@ -1,5 +1,6 @@
 """Konfiguration. Einzige Config-Quelle des Pakets — alles läuft über Settings."""
 
+from pydantic import model_validator
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
@@ -51,3 +52,36 @@ class Settings(BaseSettings):
     kafka_sasl_mechanism: str | None = None
     kafka_sasl_username: str | None = None
     kafka_sasl_password: SecretStr | None = None
+
+    kafka_ssl_cafile: str | None = None
+    """Truststore: die CA, gegen die das Broker-Zertifikat geprüft wird.
+
+    Ohne Angabe nimmt der Kontext die Systemzertifikate. Broker mit einer
+    eigenen internen CA — der Regelfall in einem Cluster — brauchen sie."""
+
+    kafka_ssl_certfile: str | None = None
+    """Client-Zertifikat für mTLS. Nur zusammen mit ``kafka_ssl_keyfile``.
+
+    Ein Broker mit ``ssl.client.auth=required`` autorisiert je Principal, und
+    der Principal IST der CN dieses Zertifikats. Ohne Client-Material kommt
+    keine Verbindung zustande."""
+
+    kafka_ssl_keyfile: str | None = None
+    """Der private Schlüssel zu ``kafka_ssl_certfile``."""
+
+    @model_validator(mode="after")
+    def _client_material_comes_in_pairs(self) -> "Settings":
+        """Cert ohne Key (oder umgekehrt) ist eine Fehlkonfiguration.
+
+        Warum das hier scheitern muss und nicht später: der Producer verbindet
+        sich erst beim ersten Enqueue. Halbes Client-Material fiele damit nicht
+        beim Deploy auf, sondern beim ersten echten Pass-Event — als 503, das
+        wie ein Broker-Ausfall aussieht.
+        """
+        if bool(self.kafka_ssl_certfile) != bool(self.kafka_ssl_keyfile):
+            raise ValueError(
+                "kafka_ssl_certfile and kafka_ssl_keyfile belong together — "
+                "client authentication needs both, and half of the material "
+                "would only fail at the first enqueue."
+            )
+        return self

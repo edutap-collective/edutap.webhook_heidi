@@ -40,3 +40,46 @@ def test_secret_is_not_leaked_in_repr(monkeypatch):
     """SecretStr darf nicht in Logs/Tracebacks landen."""
     monkeypatch.setenv(f"{ENV_PREFIX}WEBHOOK_SECRET", "s3cret")
     assert "s3cret" not in repr(Settings(_env_file=None))
+
+
+def test_ssl_settings_default_to_none(monkeypatch):
+    """Ohne TLS-Angaben bleibt das Backend bei PLAINTEXT — der Default darf
+    keinen Truststore erfinden."""
+    monkeypatch.setenv(f"{ENV_PREFIX}WEBHOOK_SECRET", "s3cret")
+    settings = Settings(_env_file=None)
+    assert settings.kafka_ssl_cafile is None
+    assert settings.kafka_ssl_certfile is None
+    assert settings.kafka_ssl_keyfile is None
+
+
+def test_ssl_settings_from_env(monkeypatch):
+    monkeypatch.setenv(f"{ENV_PREFIX}WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setenv(f"{ENV_PREFIX}KAFKA_SECURITY_PROTOCOL", "SSL")
+    monkeypatch.setenv(f"{ENV_PREFIX}KAFKA_SSL_CAFILE", "/run/secrets/kafka_ca")
+    monkeypatch.setenv(f"{ENV_PREFIX}KAFKA_SSL_CERTFILE", "/run/secrets/cert")
+    monkeypatch.setenv(f"{ENV_PREFIX}KAFKA_SSL_KEYFILE", "/run/secrets/key")
+    settings = Settings(_env_file=None)
+    assert settings.kafka_security_protocol == "SSL"
+    assert settings.kafka_ssl_cafile == "/run/secrets/kafka_ca"
+    assert settings.kafka_ssl_certfile == "/run/secrets/cert"
+    assert settings.kafka_ssl_keyfile == "/run/secrets/key"
+
+
+def test_certfile_without_keyfile_is_rejected(monkeypatch):
+    """Halbes Client-Material ist eine Fehlkonfiguration, kein Grenzfall.
+
+    Der Broker dieses Clusters verlangt Client-Auth; ein Cert ohne Key ergibt
+    einen Handshake, der erst beim ersten Enqueue scheitert — also lange nach
+    dem Deploy. Deshalb beim Start.
+    """
+    monkeypatch.setenv(f"{ENV_PREFIX}WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setenv(f"{ENV_PREFIX}KAFKA_SSL_CERTFILE", "/run/secrets/cert")
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None)
+
+
+def test_keyfile_without_certfile_is_rejected(monkeypatch):
+    monkeypatch.setenv(f"{ENV_PREFIX}WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setenv(f"{ENV_PREFIX}KAFKA_SSL_KEYFILE", "/run/secrets/key")
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None)

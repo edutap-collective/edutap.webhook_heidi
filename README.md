@@ -88,11 +88,30 @@ EDUTAP_WEBHOOK_HEIDI_ENQUEUE_TIMEOUT=10.0         # must stay well below the sen
 EDUTAP_WEBHOOK_HEIDI_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 EDUTAP_WEBHOOK_HEIDI_KAFKA_TOPIC=heidi.pass-events
 EDUTAP_WEBHOOK_HEIDI_KAFKA_CONSUMER_GROUP=heidi-pass-spooler
-EDUTAP_WEBHOOK_HEIDI_KAFKA_SECURITY_PROTOCOL=PLAINTEXT   # e.g. SASL_SSL in production
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SECURITY_PROTOCOL=PLAINTEXT   # SSL / SASL_SSL / SASL_PLAINTEXT
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_MECHANISM=PLAIN           # optional, only with SASL
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_USERNAME=<user>            # optional
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_PASSWORD=<password>        # optional
+
+# TLS / mTLS — only read when the protocol contains SSL
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_CAFILE=/run/secrets/kafka_ca      # the broker's CA
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_CERTFILE=/run/secrets/kafka_cert  # client certificate
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_KEYFILE=/run/secrets/kafka_key    # its private key
 ```
+
+> **mTLS.** A broker configured with `ssl.client.auth=required` authorises per
+> principal, and the principal is the **CN of the client certificate** — so that
+> CN needs the produce ACL on the topic. `CERTFILE` and `KEYFILE` belong
+> together: half of the pair is rejected when the settings are constructed, not
+> at the first enqueue. That distinction matters here, because the producer only
+> connects when the first event arrives; a configuration error that waits that
+> long surfaces as a 503 long after the deployment, looking like a broker
+> outage.
+>
+> `CAFILE` is separate from the client material: it is the truststore the
+> broker's own certificate is checked against. A cluster-internal CA has to be
+> named here, otherwise verification falls back to the system trust store and
+> fails.
 
 > Do not lower `EDUTAP_WEBHOOK_HEIDI_MAX_BODY_BYTES` without a reason:
 > heidi.cloud retries EVERY non-2xx (including 413) up to 12 times over 48 h — a

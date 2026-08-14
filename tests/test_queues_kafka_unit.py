@@ -21,6 +21,7 @@ from typing import ClassVar
 
 import asyncio
 import pytest
+import ssl
 
 
 def _message(eventid: str = "evt_1", passid: str = "p1") -> QueueMessage:
@@ -555,3 +556,67 @@ async def test_get_consumer_stops_half_started_consumer_on_cancel(monkeypatch):
     assert backend._consumer is None
     assert len(_SlowStartTrackingConsumer.instances) == 1
     assert _SlowStartTrackingConsumer.instances[0].stopped is True
+
+
+async def test_plaintext_passes_no_ssl_context(monkeypatch):
+    """Der Default darf keinen TLS-Kontext erfinden: ein PLAINTEXT-Broker
+    lehnt einen TLS-Handshake ab."""
+    monkeypatch.setattr(kafka_module, "AIOKafkaProducer", _FakeProducer)
+    backend = KafkaQueueBackend(_settings())
+
+    producer = await backend._get_producer()
+
+    assert producer.kwargs["security_protocol"] == "PLAINTEXT"
+    assert producer.kwargs["ssl_context"] is None
+
+
+async def test_ssl_producer_gets_context_with_client_material(
+    monkeypatch, tmp_path, ssl_material
+):
+    """Mit SSL muss ein echter ssl.SSLContext an aiokafka gehen.
+
+    Ohne ihn baut aiokafka gegen einen Broker mit
+    ``ssl.client.auth=required`` keine Verbindung auf -- und weil der
+    Producer erst beim ersten Enqueue verbindet, faellt das nicht beim
+    Deploy auf, sondern beim ersten echten Pass-Event.
+    """
+    monkeypatch.setattr(kafka_module, "AIOKafkaProducer", _FakeProducer)
+    settings = Settings(
+        _env_file=None,
+        webhook_secret="s3cret",
+        kafka_security_protocol="SSL",
+        kafka_ssl_cafile=str(ssl_material["cafile"]),
+        kafka_ssl_certfile=str(ssl_material["certfile"]),
+        kafka_ssl_keyfile=str(ssl_material["keyfile"]),
+    )
+    backend = KafkaQueueBackend(settings)
+
+    producer = await backend._get_producer()
+
+    context = producer.kwargs["ssl_context"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    # Das Client-Material ist wirklich geladen, nicht nur der Pfad gemerkt:
+    # ein Kontext ohne Kette scheitert am Broker, der Client-Auth verlangt.
+    assert context.get_ca_certs(), "Truststore leer -- cafile nicht geladen"
+
+
+async def test_ssl_context_is_built_once(monkeypatch, ssl_material):
+    """Der Kontext liest Dateien von der Platte -- pro Enqueue neu waere
+    Arbeit fuer nichts."""
+    monkeypatch.setattr(kafka_module, "AIOKafkaProducer", _FakeProducer)
+    monkeypatch.setattr(kafka_module, "AIOKafkaConsumer", _FakeConsumer)
+    settings = Settings(
+        _env_file=None,
+        webhook_secret="s3cret",
+        kafka_security_protocol="SSL",
+        kafka_ssl_cafile=str(ssl_material["cafile"]),
+        kafka_ssl_certfile=str(ssl_material["certfile"]),
+        kafka_ssl_keyfile=str(ssl_material["keyfile"]),
+    )
+    backend = KafkaQueueBackend(settings)
+
+    producer = await backend._get_producer()
+    consumer = await backend._get_consumer()
+
+    assert producer.kwargs["ssl_context"] is consumer.kwargs["ssl_context"]

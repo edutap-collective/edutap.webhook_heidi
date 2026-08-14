@@ -54,6 +54,11 @@ test = [
     "pytest-cov",
     "coverage[toml]>=7.0",
     "httpx",
+    # Erzeugt das TLS-Material der mTLS-Tests (conftest.py::ssl_material).
+    # Ein ssl.SSLContext laesst sich nicht sinnvoll faken -- er liest echte
+    # PEM-Dateien und lehnt kaputte ab, und genau das soll der Test sehen.
+    # Vorgefertigte Zertifikate im Repo waeren die Alternative; die laufen ab.
+    "cryptography>=42.0",
 ]
 develop = [
     "pdbp>=1.7.1",
