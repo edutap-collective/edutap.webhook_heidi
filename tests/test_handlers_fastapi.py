@@ -496,8 +496,15 @@ def test_trailing_slash_is_accepted_directly(client, memory_backend):
     assert len(memory_backend.messages) == 1
 
 
-def test_successful_enqueue_logs_debug_with_event_id(client, memory_backend, caplog):
-    with caplog.at_level(logging.DEBUG, logger="edutap.webhook_heidi.handlers.fastapi"):
+def test_successful_enqueue_logs_info_with_event_id_and_type(
+    client, memory_backend, caplog
+):
+    """Bei produktionsueblichem INFO-Level erzeugte der Endpoint fuer ein
+    ERFOLGREICH verarbeitetes Event bislang keinerlei Logzeile — sichtbar war
+    nur der Statuscode im Access-Log der ASGI-Schicht. Genau diese Luecke hat
+    die Fehlersuche zum Testevent unnoetig verlaengert. Mit ``event.type`` in
+    der Zeile ist ein Testevent auch ohne Access-Log erkennbar."""
+    with caplog.at_level(logging.INFO, logger="edutap.webhook_heidi.handlers.fastapi"):
         response = _post(client, json.dumps(EVENT).encode())
 
     assert response.status_code == 204
@@ -505,5 +512,7 @@ def test_successful_enqueue_logs_debug_with_event_id(client, memory_backend, cap
         r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
     ]
     assert len(records) == 1
-    assert records[0].levelno == logging.DEBUG
-    assert EVENT["id"] in records[0].getMessage()
+    assert records[0].levelno == logging.INFO
+    logged = records[0].getMessage()
+    assert EVENT["id"] in logged
+    assert EVENT["type"] in logged
