@@ -9,6 +9,7 @@ from aiokafka import AIOKafkaConsumer
 from aiokafka import AIOKafkaProducer
 from aiokafka import TopicPartition
 from aiokafka.errors import KafkaError
+from aiokafka.helpers import create_ssl_context
 from collections.abc import AsyncIterator
 from edutap.webhook_heidi.models import QueueMessage
 from edutap.webhook_heidi.protocols import QueueUnavailable
@@ -16,10 +17,11 @@ from edutap.webhook_heidi.settings import Settings
 
 import asyncio
 import json
-import logging
+import ssl
+import structlog
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class KafkaQueueBackend:
@@ -31,11 +33,37 @@ class KafkaQueueBackend:
         self._consumer: AIOKafkaConsumer | None = None
         self._records: dict[int, tuple[str, int, int]] = {}
         self.last_key: bytes | None = None
+        # Einmal gebaut, von Producer UND Consumer benutzt — siehe
+        # _ssl_context().
+        self._ssl_context_cache: ssl.SSLContext | None = None
         # Schützt gegen die Kaltstart-Race: mehrere gleichzeitige enqueue()/
         # consume()-Aufrufe dürfen nicht je einen eigenen (verwaisten)
         # Producer/Consumer erzeugen, siehe _get_producer()/_get_consumer().
         self._producer_lock = asyncio.Lock()
         self._consumer_lock = asyncio.Lock()
+
+    def _ssl_context(self) -> ssl.SSLContext | None:
+        """Der TLS-Kontext, oder ``None`` bei einem Klartext-Broker.
+
+        Gebaut wird er nur, wenn das Protokoll TLS verlangt. Ein Kontext bei
+        PLAINTEXT wäre nicht bloß nutzlos: aiokafka nähme ihn und der Handshake
+        gegen einen Klartext-Listener schlüge fehl.
+
+        Einmal gebaut, dann gemerkt — er liest PEM-Dateien von der Platte, und
+        Producer und Consumer sollen sich denselben teilen.
+        """
+        if "SSL" not in self._settings.kafka_security_protocol:
+            return None
+        if self._ssl_context_cache is None:
+            # aiokafkas eigener Helfer: er setzt verify_mode und check_hostname
+            # so, wie die Bibliothek sie erwartet. Ein handgebauter Kontext
+            # weicht erfahrungsgemäß genau dort ab, wo es später weh tut.
+            self._ssl_context_cache = create_ssl_context(
+                cafile=self._settings.kafka_ssl_cafile,
+                certfile=self._settings.kafka_ssl_certfile,
+                keyfile=self._settings.kafka_ssl_keyfile,
+            )
+        return self._ssl_context_cache
 
     def _auth(self) -> dict:
         password = self._settings.kafka_sasl_password
@@ -46,6 +74,7 @@ class KafkaQueueBackend:
             "sasl_plain_password": (
                 password.get_secret_value() if password is not None else None
             ),
+            "ssl_context": self._ssl_context(),
         }
 
     async def _get_producer(self) -> AIOKafkaProducer:
@@ -195,10 +224,12 @@ class KafkaQueueBackend:
             # Log wäre das eine Redelivery-Endlosschleife ohne jeden
             # Hinweis: kein Commit, keine Exception.
             logger.warning(
-                "ack(): Nachricht (eventid=%s) nicht in _records gefunden -- "
-                "nichts committet. Vermutlich wurde nicht dasselbe Objekt "
-                "geackt, das consume() geliefert hat.",
-                message.eventid,
+                "ack() found no record, nothing committed",
+                eventid=message.eventid,
+                hint=(
+                    "ack() needs the very object consume() returned; a copy "
+                    "acks into the void and redelivers forever"
+                ),
             )
             return
         if self._consumer is None:

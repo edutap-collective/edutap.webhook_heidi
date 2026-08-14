@@ -8,10 +8,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from plugins import ExplodingQueueBackend
 from plugins import FailingQueueBackend
+from structlog.testing import capture_logs
 
 import httpx
 import json
-import logging
 import pytest
 import time
 
@@ -351,14 +351,12 @@ def test_unsigned_non_json_body_is_rejected_with_401_not_400(client, memory_back
     assert memory_backend.messages == []
 
 
-def test_invalid_signature_logs_warning_without_secrets(client, memory_backend, caplog):
+def test_invalid_signature_logs_warning_without_secrets(client, memory_backend):
     """401 wird geloggt (Hinweis auf mögliche Secret-Rotation), aber ohne Body
     oder Signaturwert — keine Payloads/Secrets in Logs."""
     body = json.dumps(EVENT).encode()
 
-    with caplog.at_level(
-        logging.WARNING, logger="edutap.webhook_heidi.handlers.fastapi"
-    ):
+    with capture_logs() as logs:
         response = client.post(
             PATH,
             content=body,
@@ -366,29 +364,29 @@ def test_invalid_signature_logs_warning_without_secrets(client, memory_backend, 
         )
 
     assert response.status_code == 401
-    records = [
-        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
-    ]
-    assert len(records) == 1
-    assert records[0].levelno == logging.WARNING
-    logged = records[0].getMessage()
+    rejected = [entry for entry in logs if entry["event"] == "signature rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["log_level"] == "warning"
+    # Ueber den GANZEN Eintrag, nicht nur ueber die Meldung: bei structlog
+    # tragen die Schluesselwoerter den Inhalt, und genau dort rutscht ein Wert
+    # herein, den eine Pruefung auf den Meldungstext nie faende.
+    logged = repr(rejected[0])
     assert "deadbeefdeadbeef" not in logged
     assert EVENT["data"]["person_id"] not in logged
     assert EVENT["id"] not in logged
 
 
-def test_malformed_envelope_logs_info_with_reason(client, memory_backend, caplog):
+def test_malformed_envelope_logs_info_with_reason(client, memory_backend):
     body = json.dumps({"id": "evt_1"}).encode()
 
-    with caplog.at_level(logging.INFO, logger="edutap.webhook_heidi.handlers.fastapi"):
+    with capture_logs() as logs:
         response = _post(client, body)
 
     assert response.status_code == 400
-    records = [
-        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
-    ]
-    assert len(records) == 1
-    assert records[0].levelno == logging.INFO
+    rejected = [entry for entry in logs if entry["event"] == "envelope rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["log_level"] == "info"
+    assert rejected[0]["error_count"] > 0
 
 
 def test_malformed_envelope_400_log_does_not_leak_pii(client, memory_backend, caplog):
@@ -408,48 +406,37 @@ def test_malformed_envelope_400_log_does_not_leak_pii(client, memory_backend, ca
         }
     ).encode()
 
-    with caplog.at_level(logging.INFO, logger="edutap.webhook_heidi.handlers.fastapi"):
+    with capture_logs() as logs:
         response = _post(client, body)
 
     assert response.status_code == 400
-    records = [
-        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
-    ]
-    assert len(records) == 1
-    logged = records[0].getMessage()
-    assert "MATRIKELNUMMER-12345" not in logged
+    assert logs, "ohne Log-Zeilen prueft dieser Test nichts"
+    for entry in logs:
+        assert "MATRIKELNUMMER-12345" not in repr(entry)
 
 
-def test_oversized_body_logs_warning_with_size(client, memory_backend, caplog):
+def test_oversized_body_logs_warning_with_size(client, memory_backend):
     body = b"a" * (2 * 1024 * 1024)
 
-    with caplog.at_level(
-        logging.WARNING, logger="edutap.webhook_heidi.handlers.fastapi"
-    ):
+    with capture_logs() as logs:
         response = _post(client, body)
 
     assert response.status_code == 413
-    records = [
-        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
-    ]
-    assert len(records) == 1
-    assert records[0].levelno == logging.WARNING
-    assert str(len(body)) in records[0].getMessage()
+    oversized = [entry for entry in logs if entry["event"] == "payload too large"]
+    assert len(oversized) == 1
+    assert oversized[0]["log_level"] == "warning"
+    assert oversized[0]["content_length"] == len(body)
 
 
-def test_queue_unavailable_logs_error_with_event_id(
-    client, failing_queue_backend, caplog
-):
-    with caplog.at_level(logging.ERROR, logger="edutap.webhook_heidi.handlers.fastapi"):
+def test_queue_unavailable_logs_error_with_event_id(client, failing_queue_backend):
+    with capture_logs() as logs:
         response = _post(client, json.dumps(EVENT).encode())
 
     assert response.status_code == 503
-    records = [
-        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
-    ]
-    assert len(records) == 1
-    assert records[0].levelno == logging.ERROR
-    assert EVENT["id"] in records[0].getMessage()
+    failed = [entry for entry in logs if entry["event"] == "enqueue failed"]
+    assert len(failed) == 1
+    assert failed[0]["log_level"] == "error"
+    assert failed[0]["event_id"] == EVENT["id"]
 
 
 def test_trailing_slash_is_accepted_directly(client, memory_backend):
@@ -478,14 +465,80 @@ def test_trailing_slash_is_accepted_directly(client, memory_backend):
     assert len(memory_backend.messages) == 1
 
 
-def test_successful_enqueue_logs_debug_with_event_id(client, memory_backend, caplog):
-    with caplog.at_level(logging.DEBUG, logger="edutap.webhook_heidi.handlers.fastapi"):
+def test_successful_enqueue_logs_the_event_id(client, memory_backend):
+    """Der Erfolgsfall muss im Log an der event.id wiederzufinden sein.
+
+    ``structlog.testing.capture_logs`` statt ``caplog``: die Log-Aufrufe des
+    Pakets sind structlog-Aufrufe und gehen an der stdlib-Logging-Maschinerie
+    vorbei, die ``caplog`` abgreift.
+    """
+    with capture_logs() as logs:
         response = _post(client, json.dumps(EVENT).encode())
 
     assert response.status_code == 204
-    records = [
-        r for r in caplog.records if r.name == "edutap.webhook_heidi.handlers.fastapi"
+    enqueued = [entry for entry in logs if entry["event"] == "event enqueued"]
+    assert len(enqueued) == 1
+    assert enqueued[0]["log_level"] == "debug"
+    assert enqueued[0]["event_id"] == EVENT["id"]
+
+
+def test_debug_logs_the_whole_path_of_an_event(client, memory_backend):
+    """Auf DEBUG muss der Weg eines Events nachvollziehbar sein.
+
+    Ohne das ist ein Testlauf gegen den deployten Dienst blind: bis hierher
+    schrieb der Erfolgsfall genau eine Zeile und der webhook.test-Pfad keine.
+    """
+    with capture_logs() as logs:
+        response = _post(client, json.dumps(EVENT).encode())
+
+    assert response.status_code == 204
+    events = [entry["event"] for entry in logs]
+    assert events == [
+        "event received",
+        "signature verified",
+        "envelope parsed",
+        "enqueueing",
+        "event enqueued",
     ]
-    assert len(records) == 1
-    assert records[0].levelno == logging.DEBUG
-    assert EVENT["id"] in records[0].getMessage()
+
+
+def test_debug_logs_the_test_event_as_not_enqueued(client, memory_backend):
+    """Die 200 auf webhook.test ist absichtlich kein Enqueue.
+
+    Wer im Log sucht, soll genau das lesen und nicht auf ein verlorenes Event
+    schliessen -- die Frage kam bei der Inbetriebnahme sofort auf.
+    """
+    event = {**EVENT, "type": "webhook.test"}
+    with capture_logs() as logs:
+        response = _post(client, json.dumps(event).encode())
+
+    assert response.status_code == 200
+    assert memory_backend.messages == []
+    accepted = [
+        entry
+        for entry in logs
+        if entry["event"] == "connectivity test accepted, deliberately not enqueued"
+    ]
+    assert len(accepted) == 1
+    assert accepted[0]["status"] == 200
+    assert "enqueueing" not in [entry["event"] for entry in logs]
+
+
+def test_debug_never_logs_the_person_id(client, memory_backend):
+    """person_id ist an der LMU die Matrikelnummer.
+
+    Der Test steht hier, weil DEBUG-Logging genau die Versuchung ist, bei der
+    so ein Wert hineinrutscht -- und weil er es von dort in jedes Log-Backend
+    schafft, aus dem ihn niemand mehr entfernt. Wer die person_id doch braucht,
+    nimmt ``edutap.observability_settings.person_label``, das sie nach
+    EDUTAP_PERSON_UID_MODE pseudonymisiert, im Klartext zeigt oder weglaesst.
+    """
+    marker = "MATRIKELNUMMER-4711"
+    event = {**EVENT, "data": {**EVENT["data"], "person_id": marker}}
+    with capture_logs() as logs:
+        response = _post(client, json.dumps(event).encode())
+
+    assert response.status_code == 204
+    assert logs, "ohne Log-Zeilen prueft dieser Test nichts"
+    for entry in logs:
+        assert marker not in repr(entry)

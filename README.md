@@ -88,11 +88,65 @@ EDUTAP_WEBHOOK_HEIDI_ENQUEUE_TIMEOUT=10.0         # must stay well below the sen
 EDUTAP_WEBHOOK_HEIDI_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 EDUTAP_WEBHOOK_HEIDI_KAFKA_TOPIC=heidi.pass-events
 EDUTAP_WEBHOOK_HEIDI_KAFKA_CONSUMER_GROUP=heidi-pass-spooler
-EDUTAP_WEBHOOK_HEIDI_KAFKA_SECURITY_PROTOCOL=PLAINTEXT   # e.g. SASL_SSL in production
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SECURITY_PROTOCOL=PLAINTEXT   # SSL / SASL_SSL / SASL_PLAINTEXT
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_MECHANISM=PLAIN           # optional, only with SASL
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_USERNAME=<user>            # optional
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SASL_PASSWORD=<password>        # optional
+
+# TLS / mTLS — only read when the protocol contains SSL
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_CAFILE=/run/secrets/kafka_ca      # the broker's CA
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_CERTFILE=/run/secrets/kafka_cert  # client certificate
+EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_KEYFILE=/run/secrets/kafka_key    # its private key
 ```
+
+### Logging and tracing
+
+The log calls in this package are **structlog** calls, so the library carries
+`structlog` and nothing else — a consumer that mounts the router keeps its own
+logging setup and this package does not touch it.
+
+The standalone service is the other case: `standalone.py` calls
+`install_observability()` from
+[`edutap.observability_settings`](https://pypi.org/project/edutap.observability-settings/)
+before anything else, which configures structured JSON logging, Sentry and the OTLP
+exporter the way every eduTAP service does. It comes with the `[observability]`
+extra, which the `Dockerfile` installs:
+
+```bash
+pip install "edutap.webhook-heidi[kafka,observability]"
+```
+
+The level is `EDUTAP_LOG_LEVEL` — that package's variable, deliberately not a second
+one under this package's prefix. `DEBUG` makes the path of an event readable, which
+is what commissioning needs and steady state does not:
+
+```
+event received       body_bytes=174 signature_header=True
+signature verified
+envelope parsed      event_id=evt_… event_type=webhook.test pass_id=0000…
+connectivity test accepted, deliberately not enqueued   event_id=evt_… status=200
+```
+
+> **`person_id` is never logged**, at any level. At a university it resolves to a
+> human being — at the LMU it is the student number. Event id, event type and
+> `pass_id` are opaque and are logged; the payload is not. A service that does need
+> the person in its logs takes `person_label()` from
+> `edutap.observability_settings`, which pseudonymises, shows or omits it according
+> to `EDUTAP_PERSON_UID_MODE`.
+
+> **mTLS.** A broker configured with `ssl.client.auth=required` authorises per
+> principal, and the principal is the **CN of the client certificate** — so that
+> CN needs the produce ACL on the topic. `CERTFILE` and `KEYFILE` belong
+> together: half of the pair is rejected when the settings are constructed, not
+> at the first enqueue. That distinction matters here, because the producer only
+> connects when the first event arrives; a configuration error that waits that
+> long surfaces as a 503 long after the deployment, looking like a broker
+> outage.
+>
+> `CAFILE` is separate from the client material: it is the truststore the
+> broker's own certificate is checked against. A cluster-internal CA has to be
+> named here, otherwise verification falls back to the system trust store and
+> fails.
 
 > Do not lower `EDUTAP_WEBHOOK_HEIDI_MAX_BODY_BYTES` without a reason:
 > heidi.cloud retries EVERY non-2xx (including 413) up to 12 times over 48 h — a

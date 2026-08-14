@@ -206,3 +206,71 @@ async def kafka_settings() -> Settings:
         kafka_topic=f"test.pass-events.{uuid.uuid4().hex[:8]}",
         kafka_consumer_group=f"test-group-{uuid.uuid4().hex[:8]}",
     )
+
+
+@pytest.fixture(scope="session")
+def ssl_material(tmp_path_factory):
+    """Eine kleine CA plus ein Client-Zertifikat, als PEM-Dateien auf der Platte.
+
+    Echtes Material, kein Fake: ``ssl.SSLContext`` liest die Dateien wirklich
+    und lehnt kaputte ab. Genau das soll der Test sehen -- ein gemockter
+    Kontext wuerde die eine Frage nicht beantworten, um die es geht (kommt am
+    Broker ein verwendbares Client-Zertifikat an?).
+
+    session-scoped: RSA-Schluessel zu erzeugen kostet spuerbar Zeit, und das
+    Material ist zwischen den Tests unveraendert.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    from datetime import datetime
+    from datetime import timedelta
+    from datetime import timezone
+
+    directory = tmp_path_factory.mktemp("kafka-tls")
+    now = datetime.now(timezone.utc)
+
+    def _name(common_name: str) -> x509.Name:
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(_name("test-ca"))
+        .issuer_name(_name("test-ca"))
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+
+    client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client_cert = (
+        x509.CertificateBuilder()
+        .subject_name(_name("edutap-production-heidi-webhook"))
+        .issuer_name(ca_cert.subject)
+        .public_key(client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+
+    cafile = directory / "ca.pem"
+    certfile = directory / "client.pem"
+    keyfile = directory / "client.key"
+    cafile.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+    certfile.write_bytes(client_cert.public_bytes(serialization.Encoding.PEM))
+    keyfile.write_bytes(
+        client_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    return {"cafile": cafile, "certfile": certfile, "keyfile": keyfile}

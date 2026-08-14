@@ -21,12 +21,12 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import Response
 
-import logging
 import pydantic
+import structlog
 import time
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 settings = Settings()
 
@@ -43,9 +43,8 @@ try:
     get_queue_backend()
 except (NotImplementedError, ValueError):
     logger.warning(
-        "Kein Queue-Backend beim Import auflösbar — wird beim ersten Request "
-        "erneut versucht; bleibt es dann weiterhin unauflösbar, antwortet der "
-        "Endpoint mit 503 statt zu enqueuen."
+        "no queue backend at import time; retried on the first request, "
+        "answered with 503 if it stays unresolvable"
     )
 
 router = APIRouter(
@@ -71,9 +70,10 @@ async def _read_body_limited(request: Request, limit: int) -> bytes:
         size += len(chunk)
         if size > limit:
             logger.warning(
-                "Payload zu groß (mindestens %s Bytes gelesen, Limit=%s Bytes).",
-                size,
-                limit,
+                "payload too large",
+                bytes_read=size,
+                limit_bytes=limit,
+                detected_by="stream",
             )
             raise HTTPException(status_code=413, detail="Payload too large.")
         chunks.append(chunk)
@@ -118,9 +118,10 @@ async def handle_pass_event(request: Request) -> Response:
             declared_length = None
         if declared_length is not None and declared_length > settings.max_body_bytes:
             logger.warning(
-                "Payload zu groß (Content-Length=%s Bytes, Limit=%s Bytes).",
-                declared_length,
-                settings.max_body_bytes,
+                "payload too large",
+                content_length=declared_length,
+                limit_bytes=settings.max_body_bytes,
+                detected_by="content-length",
             )
             raise HTTPException(status_code=413, detail="Payload too large.")
 
@@ -130,6 +131,12 @@ async def handle_pass_event(request: Request) -> Response:
     # Encoding), ist das die eigentliche Absicherung gegen Memory-DoS, nicht
     # nur ein Nachtrag.
     body = await _read_body_limited(request, settings.max_body_bytes)
+    # Kein Body-Inhalt, nur seine Groesse: der Body traegt person_id.
+    logger.debug(
+        "event received",
+        body_bytes=len(body),
+        signature_header=bool(request.headers.get(SIGNATURE_HEADER)),
+    )
 
     if not verify(
         settings.webhook_secret.get_secret_value(),
@@ -141,11 +148,14 @@ async def handle_pass_event(request: Request) -> Response:
         # Kein Body, keine Signatur im Log — nur der Hinweis, dass es
         # passiert ist (mögliche Ursache: rotiertes Secret).
         logger.warning(
-            "Signaturprüfung fehlgeschlagen — evtl. rotiertes Secret? (%s %s)",
-            request.method,
-            request.url.path,
+            "signature rejected",
+            method=request.method,
+            path=request.url.path,
+            hint="a rotated secret is the usual cause",
         )
         raise HTTPException(status_code=401, detail="Invalid signature.")
+
+    logger.debug("signature verified")
 
     try:
         event = WebhookEvent.model_validate_json(body)
@@ -157,21 +167,44 @@ async def handle_pass_event(request: Request) -> Response:
         # herausziehen, nie den Wert.
         error_locations = [e["loc"] for e in exc.errors()]
         logger.info(
-            "Envelope-Validierung fehlgeschlagen (%s Fehler, Orte=%s).",
-            exc.error_count(),
-            error_locations,
+            "envelope rejected",
+            error_count=exc.error_count(),
+            error_locations=error_locations,
         )
         raise HTTPException(
             status_code=400, detail="Malformed event envelope."
         ) from exc
 
+    # id, type und pass_id sind opake Kennungen. person_id und payload
+    # bleiben draussen: an der LMU steht dort die Matrikelnummer, und was
+    # einmal im Log steht, entfernt dort niemand mehr.
+    logger.debug(
+        "envelope parsed",
+        event_id=event.id,
+        event_type=event.type,
+        pass_id=event.data.pass_id,
+    )
+
     if event.type == WEBHOOK_TEST:
+        logger.debug(
+            "connectivity test accepted, deliberately not enqueued",
+            event_id=event.id,
+            event_type=WEBHOOK_TEST,
+            status=200,
+        )
         return Response(status_code=200)
 
     # Bewusst VOR dem try-Block: ein Modellfehler hier wäre ein eigener Bug
     # (nicht ein Backend-/Infrastrukturproblem) und soll deshalb nicht vom
     # breiten except unten fälschlich als 503 maskiert werden.
     message = QueueMessage.from_event(event)
+
+    logger.debug(
+        "enqueueing",
+        topic=settings.kafka_topic,
+        event_id=event.id,
+        partition_key=message.passid,
+    )
 
     try:
         await get_queue_backend().enqueue(message)
@@ -185,8 +218,8 @@ async def handle_pass_event(request: Request) -> Response:
         # und Alerts erzeugen. logger.exception() (statt .error()), damit der
         # Traceback trotzdem erhalten bleibt — sonst maskieren wir eigene Bugs
         # spurlos.
-        logger.exception("Enqueue fehlgeschlagen (event.id=%s).", event.id)
+        logger.exception("enqueue failed", event_id=event.id)
         raise HTTPException(status_code=503, detail="Queue unavailable.") from exc
 
-    logger.debug("Event enqueued (event.id=%s).", event.id)
+    logger.debug("event enqueued", event_id=event.id, status=204)
     return Response(status_code=204)

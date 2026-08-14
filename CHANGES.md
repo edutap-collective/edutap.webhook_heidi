@@ -6,6 +6,60 @@ All notable changes to this project are documented here.
 
 ### Features
 
+- **Structured logging and tracing, wired as in every eduTAP service.** The log calls
+  in the library are structlog calls (`structlog` is a core dependency); the standalone
+  service calls `install_observability()` from `edutap.observability_settings` before
+  anything else, which configures JSON logging, Sentry and the OTLP exporter. That
+  package is the new `[observability]` extra, installed by the `Dockerfile` — an extra
+  and not a core dependency, because a consumer that only mounts the router should not
+  inherit logfire and sentry-sdk along with it.
+
+  The level is `EDUTAP_LOG_LEVEL`, the estate's own variable, deliberately not a second
+  one under this package's prefix — the second name is the one that eventually
+  disagrees with the one that takes effect.
+
+  On `DEBUG` the path of an event is now readable end to end (`event received` →
+  `signature verified` → `envelope parsed` → `enqueueing` → `event enqueued`). Before
+  this the whole successful path logged a single line and the `webhook.test` path
+  logged nothing at all — which made the first commissioning test look like a lost
+  event: the sender saw its 200 while the queue and the log stayed empty, exactly as
+  designed and with nothing anywhere saying so. That case now says it in as many words:
+  `connectivity test accepted, deliberately not enqueued`.
+
+  **`person_id` is not logged, at any level.** At a university it resolves to a human
+  being — at the LMU it is the student number — and DEBUG logging is precisely where
+  such a value slips in and from where it reaches every log backend nobody removes it
+  from again. Event id, event type and `pass_id` are opaque and are logged; the payload
+  is not. A regression test asserts it, and was verified to fail when the field is
+  added on purpose. Consumers that do need the person use `person_label()` from
+  `edutap.observability_settings`.
+
+- **TLS and mTLS for the Kafka backend** (`Settings.kafka_ssl_cafile` /
+  `kafka_ssl_certfile` / `kafka_ssl_keyfile`, `KafkaQueueBackend._ssl_context`).
+  Until now the backend could only reach a broker over PLAINTEXT or SASL: it built
+  its producer arguments from `security_protocol` and the four SASL fields, and had
+  no way to pass a `ssl_context` to aiokafka at all. A broker that listens on
+  `SSL://` with `ssl.client.auth=required` — the ordinary shape of a cluster-internal
+  Kafka — was therefore unreachable, and because the producer only connects when the
+  first event arrives, that surfaced as a 503 on the first real pass event rather
+  than at deployment.
+
+  The context is built by aiokafka's own `create_ssl_context` helper, only when the
+  protocol actually contains `SSL` (a context handed to a PLAINTEXT listener is not
+  merely useless — the handshake fails), and exactly once: it reads PEM files from
+  disk, and producer and consumer share the same instance.
+
+  `certfile` and `keyfile` are validated as a pair when the settings are
+  constructed. Half of the client material is a misconfiguration, and the deferred
+  connect would otherwise turn it into a 503 that looks like a broker outage. Note
+  that on a broker with client authentication the **CN of the client certificate is
+  the Kafka principal** — that CN needs the produce ACL on the topic; the
+  certificate alone does not authorise anything.
+
+  Tested against real TLS material (a small CA plus a client certificate, generated
+  in the `ssl_material` fixture) rather than a mocked context: an `ssl.SSLContext`
+  reads the files and rejects broken ones, which is the one property worth
+  asserting. This adds `cryptography` to the `[test]` extra.
 - Settings (pydantic-settings) for the webhook secret, the signature tolerance and
   Kafka.
 - Data models `WebhookEvent`/`WebhookEventData` (the envelope, deliberately validated

@@ -25,10 +25,18 @@ downgrade that fail-fast to a warning plus a lookup on the first request.
 ``Settings.webhook_secret`` has no default, so the process refuses to start
 without one. That is deliberate too: the alternative is a service that comes up
 happily and rejects every signature it is sent.
+
+**Observability is installed here, and only here.** ``install_observability``
+configures structlog, Sentry and the OTLP exporter for the whole process — which a
+library must never do to its consumer. An application that embeds the router instead
+calls it itself, or does not, and this module is not involved either way. It is the
+first thing to run, before the settings the service needs are resolved, so that a
+process refusing to start is reported rather than silently absent.
 """
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from edutap.observability_settings import install_observability
 from edutap.webhook_heidi.plugins import add_plugin
 from edutap.webhook_heidi.plugins import get_queue_backend
 from edutap.webhook_heidi.queues.kafka import KafkaQueueBackend
@@ -37,6 +45,16 @@ from importlib.metadata import version
 
 
 __version__ = version("edutap.webhook-heidi")
+
+# Vor allem Übrigen -- auch vor add_plugin() und dem Router-Import darunter, die
+# beide scheitern können. Ein Start, der fehlschlägt, soll berichtet werden und
+# nicht bloß ausbleiben.
+#
+# Der Log-Level kommt von EDUTAP_LOG_LEVEL, nicht aus den Settings dieses Pakets:
+# eine zweite Variable für denselben Wert wäre eine, die irgendwann von der
+# abweicht, die tatsächlich wirkt. DEBUG macht den Weg eines Events sichtbar --
+# zur Inbetriebnahme gedacht, für den Dauerbetrieb zu viel.
+install_observability(service_name="edutap.webhook_heidi", service_version=__version__)
 
 add_plugin(KafkaQueueBackend)
 
