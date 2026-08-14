@@ -99,6 +99,41 @@ EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_CERTFILE=/run/secrets/kafka_cert  # client certif
 EDUTAP_WEBHOOK_HEIDI_KAFKA_SSL_KEYFILE=/run/secrets/kafka_key    # its private key
 ```
 
+### Logging and tracing
+
+The log calls in this package are **structlog** calls, so the library carries
+`structlog` and nothing else — a consumer that mounts the router keeps its own
+logging setup and this package does not touch it.
+
+The standalone service is the other case: `standalone.py` calls
+`install_observability()` from
+[`edutap.observability_settings`](https://pypi.org/project/edutap.observability-settings/)
+before anything else, which configures structured JSON logging, Sentry and the OTLP
+exporter the way every eduTAP service does. It comes with the `[observability]`
+extra, which the `Dockerfile` installs:
+
+```bash
+pip install "edutap.webhook-heidi[kafka,observability]"
+```
+
+The level is `EDUTAP_LOG_LEVEL` — that package's variable, deliberately not a second
+one under this package's prefix. `DEBUG` makes the path of an event readable, which
+is what commissioning needs and steady state does not:
+
+```
+event received       body_bytes=174 signature_header=True
+signature verified
+envelope parsed      event_id=evt_… event_type=webhook.test pass_id=0000…
+connectivity test accepted, deliberately not enqueued   event_id=evt_… status=200
+```
+
+> **`person_id` is never logged**, at any level. At a university it resolves to a
+> human being — at the LMU it is the student number. Event id, event type and
+> `pass_id` are opaque and are logged; the payload is not. A service that does need
+> the person in its logs takes `person_label()` from
+> `edutap.observability_settings`, which pseudonymises, shows or omits it according
+> to `EDUTAP_PERSON_UID_MODE`.
+
 > **mTLS.** A broker configured with `ssl.client.auth=required` authorises per
 > principal, and the principal is the **CN of the client certificate** — so that
 > CN needs the produce ACL on the topic. `CERTFILE` and `KEYFILE` belong

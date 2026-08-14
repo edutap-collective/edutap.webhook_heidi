@@ -17,11 +17,11 @@ from edutap.webhook_heidi.settings import Settings
 
 import asyncio
 import json
-import logging
 import ssl
+import structlog
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class KafkaQueueBackend:
@@ -224,10 +224,12 @@ class KafkaQueueBackend:
             # Log wäre das eine Redelivery-Endlosschleife ohne jeden
             # Hinweis: kein Commit, keine Exception.
             logger.warning(
-                "ack(): Nachricht (eventid=%s) nicht in _records gefunden -- "
-                "nichts committet. Vermutlich wurde nicht dasselbe Objekt "
-                "geackt, das consume() geliefert hat.",
-                message.eventid,
+                "ack() found no record, nothing committed",
+                eventid=message.eventid,
+                hint=(
+                    "ack() needs the very object consume() returned; a copy "
+                    "acks into the void and redelivers forever"
+                ),
             )
             return
         if self._consumer is None:
