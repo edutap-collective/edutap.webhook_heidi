@@ -33,6 +33,21 @@ EVENT = {
     },
 }
 
+TEST_EVENT = {
+    "id": "evt_a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "type": "webhook.test",
+    "created": "2026-07-09T12:34:56Z",
+    "api_version": "2026-07-09",
+    "data": {
+        "pass_id": "00000000-0000-0000-0000-000000000000",
+        "person_id": "test",
+        "wallet_type": "UNSET",
+        "state": "NEW",
+        "reason": "test",
+        "confirmation": "platform",
+    },
+}
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -165,27 +180,30 @@ def test_body_is_not_json(client, memory_backend):
     assert memory_backend.messages == []
 
 
-def test_webhook_test_is_accepted_but_not_enqueued(client, memory_backend):
-    """Konnektivitätstest: 200, aber keine Null-UUID in der Queue."""
-    body = json.dumps(
-        {
-            "id": "evt_test",
-            "type": "webhook.test",
-            "created": "2026-07-09T12:34:56Z",
-            "api_version": "2026-07-09",
-            "data": {
-                "pass_id": "00000000-0000-0000-0000-000000000000",
-                "person_id": "test",
-                "wallet_type": "UNSET",
-                "state": "NEW",
-                "reason": "test",
-                "confirmation": "platform",
-            },
-        }
-    ).encode()
+def test_webhook_test_is_enqueued_and_returns_200(client, memory_backend):
+    """Der Konnektivitätstest testet ab jetzt die ganze Kette, nicht die halbe:
+    Er wird wie jedes andere Event enqueued. 200 bleibt nur als Marker
+    erhalten, damit im Access-Log ohne Body-Zugriff erkennbar ist, dass es ein
+    Testklick war — gesetzt wird er erst NACH dem bestätigten Enqueue."""
+    body = json.dumps(TEST_EVENT).encode()
 
     assert _post(client, body).status_code == 200
-    assert memory_backend.messages == []
+
+    assert len(memory_backend.messages) == 1
+    message = memory_backend.messages[0]
+    assert message.action == "webhook.test"
+    assert message.eventid == TEST_EVENT["id"]
+    assert message.passid == "00000000-0000-0000-0000-000000000000"
+
+
+def test_webhook_test_yields_503_when_queue_unavailable(
+    client, failing_queue_backend
+):
+    """Auch der Testevent darf bei kaputter Queue kein 2xx bekommen — sonst
+    meldet die Admin-UI den Konnektivitätstest als erfolgreich, obwohl der
+    Broker weg ist. 503 ist hier korrekt und gewollt: Die UI zeigt den Test
+    als fehlgeschlagen an und heidi.cloud wiederholt ihn."""
+    assert _post(client, json.dumps(TEST_EVENT).encode()).status_code == 503
 
 
 def test_queue_unavailable_yields_503(client, failing_queue_backend):
