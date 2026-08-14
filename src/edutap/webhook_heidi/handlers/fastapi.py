@@ -185,15 +185,13 @@ async def handle_pass_event(request: Request) -> Response:
         logger.exception("Enqueue fehlgeschlagen (event.id=%s).", event.id)
         raise HTTPException(status_code=503, detail="Queue unavailable.") from exc
 
-    # Bewusst INFO, nicht DEBUG: Bei produktionsueblichem INFO-Level gab es
-    # fuer ein ERFOLGREICH verarbeitetes Event sonst keinerlei Logzeile —
+    # Bewusst INFO, nicht DEBUG: Bei produktionsüblichem INFO-Level gab es
+    # für ein ERFOLGREICH verarbeitetes Event sonst keinerlei Logzeile —
     # sichtbar war nur der Statuscode im Access-Log der ASGI-Schicht, was ein
     # korrekt verarbeitetes Event von einem still verschluckten
-    # ununterscheidbar macht. event.type gehoert dazu, damit ein Testevent
+    # ununterscheidbar macht. event.type gehört dazu, damit ein Testevent
     # auch ohne Access-Log erkennbar ist.
-    logger.info(
-        "Event enqueued (event.id=%s, event.type=%s).", event.id, event.type
-    )
+    logger.info("Event enqueued (event.id=%s, event.type=%s).", event.id, event.type)
     # Der Statuscode ist die einzige Stelle, an der im Access-Log ohne
     # Body-Zugriff erkennbar ist, dass es ein Testklick aus der Admin-UI war
     # und kein Produktionsverkehr. Beides ist 2xx, der Sender wertet also

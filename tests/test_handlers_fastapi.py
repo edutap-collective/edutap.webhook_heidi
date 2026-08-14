@@ -196,9 +196,7 @@ def test_webhook_test_is_enqueued_and_returns_200(client, memory_backend):
     assert message.passid == "00000000-0000-0000-0000-000000000000"
 
 
-def test_webhook_test_yields_503_when_queue_unavailable(
-    client, failing_queue_backend
-):
+def test_webhook_test_yields_503_when_queue_unavailable(client, failing_queue_backend):
     """Auch der Testevent darf bei kaputter Queue kein 2xx bekommen — sonst
     meldet die Admin-UI den Konnektivitätstest als erfolgreich, obwohl der
     Broker weg ist. 503 ist hier korrekt und gewollt: Die UI zeigt den Test
@@ -499,11 +497,12 @@ def test_trailing_slash_is_accepted_directly(client, memory_backend):
 def test_successful_enqueue_logs_info_with_event_id_and_type(
     client, memory_backend, caplog
 ):
-    """Bei produktionsueblichem INFO-Level erzeugte der Endpoint fuer ein
-    ERFOLGREICH verarbeitetes Event bislang keinerlei Logzeile — sichtbar war
-    nur der Statuscode im Access-Log der ASGI-Schicht. Genau diese Luecke hat
-    die Fehlersuche zum Testevent unnoetig verlaengert. Mit ``event.type`` in
-    der Zeile ist ein Testevent auch ohne Access-Log erkennbar."""
+    """Ein erfolgreich verarbeitetes Event MUSS bei INFO-Level genau eine
+    Logzeile mit ``event.id`` und ``event.type`` erzeugen — sonst ist es im
+    Betrieb von einem still verschluckten nicht zu unterscheiden. Bei
+    produktionsüblichem INFO-Level erzeugte der Endpoint dafür bislang keine
+    Logzeile; sichtbar war nur der Statuscode im Access-Log der ASGI-Schicht,
+    was die Fehlersuche zum Testevent unnötig verlängert hat."""
     with caplog.at_level(logging.INFO, logger="edutap.webhook_heidi.handlers.fastapi"):
         response = _post(client, json.dumps(EVENT).encode())
 

@@ -404,6 +404,12 @@ Offsets, Consumer-Group und Commit-Strategie bleiben in `queues/kafka.py`. Damit
 ist das Backend auch für den Consumer austauschbar — sonst wäre er trotz
 Abstraktion an aiokafka gebunden.
 
+`handle(message)` muss Nachrichten mit `message.action == "webhook.test"`
+verwerfen, statt sie wie ein echtes Pass-Event zu verarbeiten — Details und
+Begründung siehe
+[2026-08-14-webhook-test-enqueue-design.md](2026-08-14-webhook-test-enqueue-design.md)
+§2/§3.3.
+
 ## 7. Tests
 
 Hauskonvention ist `fastapi.testclient.TestClient` (nicht httpx-AsyncClient),

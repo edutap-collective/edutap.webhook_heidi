@@ -25,12 +25,29 @@ von einem stillen Fehlschlag ist.
 wird in die Queue geschrieben. Der Statuscode 200 bleibt als Marker erhalten,
 gesetzt aber **erst nach** dem bestätigten Enqueue.
 
-**Voraussetzung, außerhalb dieses Pakets:** Der Consumer verwirft Nachrichten
-mit `action == "webhook.test"`. Das ist beim LMU-Spooler bereits der Fall
-(Angabe des Betreibers, 2026-08-14) und wird hier als Vertrag festgehalten, weil
-`edutap.webhook_heidi` es nicht erzwingen kann. Ein Consumer, der diese
-Nachrichten wie echte Pass-Events behandelt, würde einen Pass mit der Null-UUID
-zu verarbeiten versuchen.
+**Voraussetzung, außerhalb dieses Pakets:** Der Consumer muss Nachrichten mit
+`action == "webhook.test"` verwerfen. Das wird hier als Vertrag festgehalten,
+weil `edutap.webhook_heidi` es nicht erzwingen kann.
+
+**Offener Punkt, Stand 2026-08-14 (gegen den Quellcode verifiziert, nicht nur
+behauptet):** Beim LMU-Spooler ist dieses Verwerfen NICHT implementiert.
+`_KNOWN_ACTIONS` in `spooler/heidi/handler.py` führt `"webhook.test"` sogar
+explizit als bekannte Action, und `to_row()` verarbeitet laut eigenem
+Kommentar bewusst JEDE Action („`action` ist ein ETIKETT, `state` ist die
+Wahrheit" — ⚠️ NICHT verwerfen). `runner.py::_process` ruft
+`to_row(message)` ungefiltert für jede eingehende Nachricht auf; es gibt an
+keiner Stelle einen Filter. Diese Änderung darf erst ausgerollt werden,
+nachdem der Consumer-seitige Fix gelandet ist — das ist eine Entscheidung des
+Betreibers und außerhalb dieses Pakets.
+
+**Bis dahin, mit dem aktuellen Consumer-Stand:** Ein Testevent hat
+`state="NEW"` und `wallet_type="UNSET"` — beide validieren anstandslos.
+`to_row()` liefert damit eine Zeile mit der Null-UUID als `passid` und
+`person_uid = "test"`. `pass_state.person_uid` ist ein NOT-NULL-FK; der
+Upsert wirft eine `IntegrityError`, die als `permanent` klassifiziert wird —
+jeder Testklick in der heidi.cloud-Admin-UI erzeugt also einen DLQ-Eintrag
+plus eine Error-Logzeile im Spooler, bis der Consumer-Fix nachgezogen ist.
+Warum das mehr ist als nur Lograuschen, siehe §3.3.
 
 ## 3. Verhalten
 
@@ -85,12 +102,34 @@ korrekt und gewollt.
 ### 3.3 Kafka-seitige Auswirkungen
 
 - **Partition-Key** ist wie bei jedem Event `passid`, beim Testevent also die
-  Null-UUID `00000000-0000-0000-0000-000000000000`. Alle Testevents landen damit
-  in derselben Partition. Beim erwarteten Volumen (manuelle Klicks in der
-  Admin-UI) ist das ohne Bedeutung.
-- **Dedup-Key** ist `eventid`. Auch das Testevent trägt eine eindeutige
-  `evt_` + 32-Hex-ID (§2.3 des Basis-Designs), es entstehen also keine
-  künstlichen Duplikate über mehrere Testklicks hinweg.
+  Null-UUID `00000000-0000-0000-0000-000000000000`. `hash(Null-UUID)` fällt
+  auf EINE bestimmte Partition — und dieselbe Partition trägt auch echte
+  Pässe, deren `passid` zufällig auf denselben Hash abbildet. Weil `ack()`
+  kumulativ ist und der Consumer streng sequenziell arbeitet (konsumieren →
+  verarbeiten → acken, siehe README „Queue lesen (Spooler)"), blockiert ein
+  Testevent, an dem der Consumer hängen bleibt, diese Partition — und damit
+  Produktions-Pass-Events für eine beliebige Teilmenge echter Pässe, nicht
+  nur den Testverkehr selbst. Das, nicht das Volumen, ist der eigentliche
+  Grund, warum das Verwerfen im Consumer (§2) ein Pflichtvertrag ist und
+  keine bloße Ordentlichkeit. Der Fall ist nicht hypothetisch: Beim
+  LMU-Spooler ist das Verwerfen Stand 2026-08-14 nicht implementiert (§2).
+  Dort begrenzt aktuell nur Glück den Schaden — `IntegrityError`
+  klassifiziert als `permanent` → DLQ + `ack()` → der Spooler läuft weiter.
+  Wäre dieselbe Exception als `transient` klassifiziert, würde `runner.py`
+  bewusst OHNE Commit werfen und den Prozess beenden: eine
+  Absturz-/Redelivery-Endlosschleife auf genau dieser Partition, ausgelöst
+  durch einen einzelnen Admin-Klick auf „Test senden". Beim erwarteten
+  Volumen (manuelle Klicks in der Admin-UI) bleibt lediglich die Zahl der
+  betroffenen Testnachrichten selbst klein — das Blockierungsrisiko mindert
+  das nicht.
+- **Dedup-Key** ist `eventid`. Laut Envelope-Format (§2.3 des Basis-Designs)
+  trägt jedes Event, auch `webhook.test`, eine eindeutige `evt_` +
+  32-Hex-ID — das ist aus der allgemeinen Envelope-Spezifikation abgeleitet,
+  nicht an echten `webhook.test`-Zustellungen beobachtet. Die bisherige
+  Fixture für diesen Pfad nutzte eine konstant aussehende ID (`"evt_test"`),
+  was eher in die andere Richtung deutet. Sollte heidi.cloud Testevents doch
+  mit einer wiederholten ID senden, dedupliziert das folgenlos weg — die
+  Konsequenz eines falschen Vorzeichens hier ist klein.
 - Kein neues Topic, kein neuer Nachrichtentyp: `QueueMessage.action` trägt
   `"webhook.test"`, alle Felder sind wie gehabt belegt.
 

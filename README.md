@@ -137,6 +137,19 @@ finally:
 > 48 h vorhalten — besser 28 Tage, dann sind auch manuelle Redeliveries aus
 > der heidi.cloud-Admin-UI abgedeckt.
 
+> **`webhook.test` muss verworfen werden.** Nachrichten mit `action ==
+> "webhook.test"` (Konnektivitätstest aus der heidi.cloud-Admin-UI, siehe
+> [Design](docs/superpowers/specs/2026-08-14-webhook-test-enqueue-design.md))
+> durchlaufen denselben Pfad wie jedes andere Event und landen ebenfalls in
+> der Queue — `edutap.webhook_heidi` kann das Verwerfen nicht erzwingen, das
+> ist Aufgabe des Consumers. Das Testevent trägt die Null-UUID
+> `00000000-0000-0000-0000-000000000000` als `pass_id`; ein Consumer, der es
+> wie ein echtes Pass-Event behandelt, versucht einen nicht existierenden
+> Pass zu verarbeiten (z. B. Fremdschlüsselverletzung beim Upsert) — und weil
+> alle Testevents in derselben Kafka-Partition landen, kann ein daran
+> hängenbleibender Consumer diese Partition blockieren und damit echte
+> Pass-Events verzögern, nicht nur Testverkehr.
+
 > **`ack()` muss sequenziell erfolgen.** Kafka-Offset-Commits sind kumulativ
 > — es gibt kein „committe nur diese eine Nachricht". Ein Consumer MUSS daher
 > konsumieren → verarbeiten → acken, erst danach die nächste Nachricht aus

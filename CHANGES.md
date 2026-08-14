@@ -96,10 +96,14 @@ All notable changes to this project are documented here.
   als Marker erhalten, wird aber erst nach dem bestätigten Enqueue gesetzt.
   Bei nicht erreichbarer Queue antwortet auch der Testevent mit 503 — ein
   Konnektivitätstest, der grün meldet, während der Broker weg ist, ist
-  schlimmer als kein Test. **Voraussetzung außerhalb dieses Pakets:** Der
-  Consumer verwirft Nachrichten mit `action == "webhook.test"` (beim
-  LMU-Spooler bereits der Fall); `edutap.webhook_heidi` kann das nicht
-  erzwingen. Siehe
+  schlimmer als kein Test. **Voraussetzung außerhalb dieses Pakets, noch
+  offen:** Der Consumer muss Nachrichten mit `action == "webhook.test"`
+  verwerfen; `edutap.webhook_heidi` kann das nicht erzwingen. Beim
+  LMU-Spooler ist dieses Verwerfen Stand 2026-08-14 NICHT implementiert
+  (gegen den Quellcode verifiziert) — bis es nachgezogen ist, erzeugt jeder
+  Testklick in der Admin-UI einen DLQ-Eintrag samt Error-Log im Spooler,
+  weil `person_uid = "test"` den NOT-NULL-FK in `pass_state` verletzt. Muss
+  vor dem Deployment dieser Änderung landen. Siehe
   `docs/superpowers/specs/2026-08-14-webhook-test-enqueue-design.md`.
 - **Abschluss-Review — Entry-Point-Pfad ungetestet (IMPORTANT 1):** Bis zu
   diesem Fix hing keine einzige Test-Suite ein Backend jemals über den echten
