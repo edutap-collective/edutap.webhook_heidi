@@ -12,6 +12,9 @@ from edutap.webhook_heidi.settings import ENV_PREFIX
 import importlib.util
 import os
 import pytest
+import subprocess
+import sys
+import textwrap
 
 
 # Die eigenständige Betriebsform ruft install_observability() und braucht dafür
@@ -29,9 +32,6 @@ pytestmark = pytest.mark.skipif(
         "(edutap.observability_settings, Python >=3.13)"
     ),
 )
-import subprocess
-import sys
-import textwrap
 
 
 pytest.importorskip(
