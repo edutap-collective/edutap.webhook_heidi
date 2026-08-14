@@ -50,8 +50,9 @@ All notable changes to this project are documented here.
   Signatur gegen die rohen Body-Bytes, parst danach lax auf `WebhookEvent`
   und schreibt in die konfigurierte Queue. Statuscodes sind Vertrag, nicht
   Geschmack — heidi.cloud wiederholt jedes Non-2xx bis zu 12x über 48 h:
-  204 bei erfolgreichem Enqueue, 200 bei `webhook.test` (angenommen, aber
-  nicht enqueued), 401 nur bei ungültiger/fehlender Signatur, 400 nur wenn
+  204 bei erfolgreichem Enqueue, 200 bei `webhook.test` (ebenfalls enqueued;
+  200 nur als Marker im Access-Log, gesetzt erst nach dem bestätigten
+  Enqueue), 401 nur bei ungültiger/fehlender Signatur, 400 nur wenn
   strukturell kein Envelope vorliegt, 503 wenn die Queue nicht erreichbar
   ist. Unbekannte `type`-Werte werden durchgereicht und enden mit 204.
 - `Settings.max_body_bytes` (Default 1 MiB): Obergrenze für den rohen
@@ -60,7 +61,7 @@ All notable changes to this project are documented here.
   `handlers/fastapi.py`): 401 als `warning` (ohne Body/Signaturwert, mit
   Hinweis auf mögliche Secret-Rotation), 400 als `info` mit dem Grund, 413
   als `warning` mit der Größe, 503 als `error` mit `event.id`, erfolgreicher
-  Enqueue als `debug` mit `event.id`.
+  Enqueue als `info` mit `event.id` und `event.type`.
 - OpenAPI-Dokumentation der Statuscodes (`responses={...}` an
   `@router.post`) für 200/204/400/401/413/503.
 - `README.md`: neuer Abschnitt „Verwendung" für Consumer (LMU
@@ -84,6 +85,22 @@ All notable changes to this project are documented here.
 
 ### Fixes
 
+- **Konnektivitätstest testete nur die halbe Kette:** `webhook.test` kehrte
+  mit 200 zurück, bevor der Enqueue-Pfad erreicht war — der Testklick in der
+  heidi.cloud-Admin-UI bewies damit Netzwerkweg, TLS-Terminierung, Routing
+  und Signatur, sagte über den Zustand des Brokers aber nichts. Zusätzlich
+  gab es für diesen Pfad keine Logzeile, wodurch das Verhalten von außen
+  ununterscheidbar von einem stillen Fehlschlag war (genau das hat eine
+  Fehlersuche im Produktivbetrieb verlängert). `webhook.test` durchläuft
+  jetzt denselben Pfad wie jedes andere Event und wird enqueued; 200 bleibt
+  als Marker erhalten, wird aber erst nach dem bestätigten Enqueue gesetzt.
+  Bei nicht erreichbarer Queue antwortet auch der Testevent mit 503 — ein
+  Konnektivitätstest, der grün meldet, während der Broker weg ist, ist
+  schlimmer als kein Test. **Voraussetzung außerhalb dieses Pakets:** Der
+  Consumer verwirft Nachrichten mit `action == "webhook.test"` (beim
+  LMU-Spooler bereits der Fall); `edutap.webhook_heidi` kann das nicht
+  erzwingen. Siehe
+  `docs/superpowers/specs/2026-08-14-webhook-test-enqueue-design.md`.
 - **Abschluss-Review — Entry-Point-Pfad ungetestet (IMPORTANT 1):** Bis zu
   diesem Fix hing keine einzige Test-Suite ein Backend jemals über den echten
   `importlib.metadata.entry_points()`-Mechanismus ein — alle nutzten
