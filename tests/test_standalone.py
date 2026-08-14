@@ -9,8 +9,26 @@ backend in the global plugin registry and leak into every later test.
 
 from edutap.webhook_heidi.settings import ENV_PREFIX
 
+import importlib.util
 import os
 import pytest
+
+
+# Die eigenständige Betriebsform ruft install_observability() und braucht dafür
+# das Extra [observability] -- das seinerseits Python >=3.13 verlangt, während
+# dieses Paket >=3.10 unterstützt. Auf 3.10-3.12 ist das Modul also
+# planmäßig nicht da, und diese Tests haben dort nichts zu prüfen.
+#
+# Ein Skip und kein xfail: es fehlt nichts, was auf diesen Versionen da sein
+# sollte. Der Unterschied zählt, wenn jemand die Matrix liest und sich fragt,
+# ob hier etwas kaputt ist.
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("edutap.observability_settings") is None,
+    reason=(
+        "standalone.py braucht das Extra [observability] "
+        "(edutap.observability_settings, Python >=3.13)"
+    ),
+)
 import subprocess
 import sys
 import textwrap

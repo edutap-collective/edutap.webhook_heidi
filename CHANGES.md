@@ -144,6 +144,19 @@ All notable changes to this project are documented here.
 
 ### Fixes
 
+- **The `[observability]` extra narrowed the package's own Python support window.**
+  `edutap.observability_settings`, and `edutap.data_models` under it, require Python
+  >=3.13 while this package supports >=3.10 like its sibling wallet packages. An
+  unmarked extra is resolved across the whole supported range, so the CI went red at
+  dependency resolution — before a single test ran — on 3.10, 3.11 and 3.12.
+
+  Fixed with an environment marker rather than by raising `requires-python`: the
+  library runs on 3.10+ perfectly well, since structlog carries its log calls and
+  nothing in it needs the observability stack. Only the standalone service does, and
+  its image is `python:3.13-slim`. `tests/test_standalone.py` skips where the module is
+  legitimately absent — a skip and not an xfail, because nothing is missing that ought
+  to be there on those versions.
+
 - **Final review — the entry-point path was untested (IMPORTANT 1):** until this fix
   no test suite ever wired a backend in through the real
   `importlib.metadata.entry_points()` mechanism — all of them used `add_plugin()`. A
