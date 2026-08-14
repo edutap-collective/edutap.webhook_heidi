@@ -33,6 +33,21 @@ EVENT = {
     },
 }
 
+TEST_EVENT = {
+    "id": "evt_a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "type": "webhook.test",
+    "created": "2026-07-09T12:34:56Z",
+    "api_version": "2026-07-09",
+    "data": {
+        "pass_id": "00000000-0000-0000-0000-000000000000",
+        "person_id": "test",
+        "wallet_type": "UNSET",
+        "state": "NEW",
+        "reason": "test",
+        "confirmation": "platform",
+    },
+}
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -165,27 +180,28 @@ def test_body_is_not_json(client, memory_backend):
     assert memory_backend.messages == []
 
 
-def test_webhook_test_is_accepted_but_not_enqueued(client, memory_backend):
-    """Konnektivitätstest: 200, aber keine Null-UUID in der Queue."""
-    body = json.dumps(
-        {
-            "id": "evt_test",
-            "type": "webhook.test",
-            "created": "2026-07-09T12:34:56Z",
-            "api_version": "2026-07-09",
-            "data": {
-                "pass_id": "00000000-0000-0000-0000-000000000000",
-                "person_id": "test",
-                "wallet_type": "UNSET",
-                "state": "NEW",
-                "reason": "test",
-                "confirmation": "platform",
-            },
-        }
-    ).encode()
+def test_webhook_test_is_enqueued_and_returns_200(client, memory_backend):
+    """Der Konnektivitätstest testet ab jetzt die ganze Kette, nicht die halbe:
+    Er wird wie jedes andere Event enqueued. 200 bleibt nur als Marker
+    erhalten, damit im Access-Log ohne Body-Zugriff erkennbar ist, dass es ein
+    Testklick war — gesetzt wird er erst NACH dem bestätigten Enqueue."""
+    body = json.dumps(TEST_EVENT).encode()
 
     assert _post(client, body).status_code == 200
-    assert memory_backend.messages == []
+
+    assert len(memory_backend.messages) == 1
+    message = memory_backend.messages[0]
+    assert message.action == "webhook.test"
+    assert message.eventid == TEST_EVENT["id"]
+    assert message.passid == "00000000-0000-0000-0000-000000000000"
+
+
+def test_webhook_test_yields_503_when_queue_unavailable(client, failing_queue_backend):
+    """Auch der Testevent darf bei kaputter Queue kein 2xx bekommen — sonst
+    meldet die Admin-UI den Konnektivitätstest als erfolgreich, obwohl der
+    Broker weg ist. 503 ist hier korrekt und gewollt: Die UI zeigt den Test
+    als fehlgeschlagen an und heidi.cloud wiederholt ihn."""
+    assert _post(client, json.dumps(TEST_EVENT).encode()).status_code == 503
 
 
 def test_queue_unavailable_yields_503(client, failing_queue_backend):
@@ -465,8 +481,13 @@ def test_trailing_slash_is_accepted_directly(client, memory_backend):
     assert len(memory_backend.messages) == 1
 
 
-def test_successful_enqueue_logs_the_event_id(client, memory_backend):
-    """Der Erfolgsfall muss im Log an der event.id wiederzufinden sein.
+def test_successful_enqueue_logs_info_with_event_id_and_type(client, memory_backend):
+    """Ein erfolgreich verarbeitetes Event MUSS auf INFO genau eine Logzeile
+    mit ``event_id`` und ``event_type`` erzeugen — sonst ist es im Betrieb von
+    einem still verschluckten nicht zu unterscheiden. Auf DEBUG (dem bisherigen
+    Level) blieb der Erfolgsfall bei produktionsüblicher Konfiguration
+    unsichtbar; erkennbar war nur der Statuscode im Access-Log der
+    ASGI-Schicht, was die Fehlersuche zum Testevent unnötig verlängert hat.
 
     ``structlog.testing.capture_logs`` statt ``caplog``: die Log-Aufrufe des
     Pakets sind structlog-Aufrufe und gehen an der stdlib-Logging-Maschinerie
@@ -478,8 +499,10 @@ def test_successful_enqueue_logs_the_event_id(client, memory_backend):
     assert response.status_code == 204
     enqueued = [entry for entry in logs if entry["event"] == "event enqueued"]
     assert len(enqueued) == 1
-    assert enqueued[0]["log_level"] == "debug"
+    assert enqueued[0]["log_level"] == "info"
     assert enqueued[0]["event_id"] == EVENT["id"]
+    assert enqueued[0]["event_type"] == EVENT["type"]
+    assert enqueued[0]["status"] == 204
 
 
 def test_debug_logs_the_whole_path_of_an_event(client, memory_backend):
@@ -502,26 +525,29 @@ def test_debug_logs_the_whole_path_of_an_event(client, memory_backend):
     ]
 
 
-def test_debug_logs_the_test_event_as_not_enqueued(client, memory_backend):
-    """Die 200 auf webhook.test ist absichtlich kein Enqueue.
+def test_logs_show_the_test_event_taking_the_normal_path(client, memory_backend):
+    """Der Konnektivitätstest durchläuft dieselben Log-Stationen wie jedes
+    andere Event — inklusive ``enqueueing`` und ``event enqueued``.
 
-    Wer im Log sucht, soll genau das lesen und nicht auf ein verlorenes Event
-    schliessen -- die Frage kam bei der Inbetriebnahme sofort auf.
-    """
-    event = {**EVENT, "type": "webhook.test"}
+    Vorher bog er vor dem Enqueue ab und wurde als "deliberately not enqueued"
+    geloggt. Wer im Log sucht, muss jetzt genau das Gegenteil lesen können:
+    dass der Test bis in die Queue durchgelaufen ist. Sonst bleibt beim
+    Klick auf "Test senden" wieder offen, ob der Broker erreichbar war."""
     with capture_logs() as logs:
-        response = _post(client, json.dumps(event).encode())
+        response = _post(client, json.dumps(TEST_EVENT).encode())
 
     assert response.status_code == 200
-    assert memory_backend.messages == []
-    accepted = [
-        entry
-        for entry in logs
-        if entry["event"] == "connectivity test accepted, deliberately not enqueued"
-    ]
-    assert len(accepted) == 1
-    assert accepted[0]["status"] == 200
-    assert "enqueueing" not in [entry["event"] for entry in logs]
+    assert len(memory_backend.messages) == 1
+
+    events = [entry["event"] for entry in logs]
+    assert "enqueueing" in events
+    enqueued = [entry for entry in logs if entry["event"] == "event enqueued"]
+    assert len(enqueued) == 1
+    assert enqueued[0]["event_type"] == "webhook.test"
+    # Der 200er ist der einzige Marker, an dem ein Testklick im Access-Log
+    # von Produktionsverkehr zu unterscheiden ist — er muss auch im
+    # strukturierten Log auftauchen.
+    assert enqueued[0]["status"] == 200
 
 
 def test_debug_never_logs_the_person_id(client, memory_backend):

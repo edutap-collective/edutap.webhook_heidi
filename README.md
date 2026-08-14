@@ -124,8 +124,14 @@ is what commissioning needs and steady state does not:
 event received       body_bytes=174 signature_header=True
 signature verified
 envelope parsed      event_id=evt_… event_type=webhook.test pass_id=0000…
-connectivity test accepted, deliberately not enqueued   event_id=evt_… status=200
+enqueueing           topic=heidi.passes event_id=evt_… partition_key=0000…
+event enqueued       event_id=evt_… event_type=webhook.test status=200
 ```
+
+The connectivity test takes the same stations as any other event — that is the point
+of it: it reaches the broker, so a green test means the broker answered. `status=200`
+(rather than 204) is what marks it as a test click; `event enqueued` is logged at
+`INFO`, so the successful path stays visible at production log levels.
 
 > **`person_id` is never logged**, at any level. At a university it resolves to a
 > human being — at the LMU it is the student number. Event id, event type and
@@ -202,6 +208,18 @@ finally:
 > **nothing** — without raising. The result is an endless redelivery loop. The
 > Kafka backend now logs this case as a `warning`, but do not rely on that: the
 > message has to stay referenced until `ack()` is called, not be re-serialised.
+
+> **`webhook.test` has to be discarded.** Messages carrying `action ==
+> "webhook.test"` — the connectivity test from the heidi.cloud admin UI, see
+> [design](docs/superpowers/specs/2026-08-14-webhook-test-enqueue-design.md) —
+> take the same path as every other event and land in the queue as well.
+> `edutap.webhook_heidi` cannot enforce the discard; that is the consumer's job.
+> The test event carries the null UUID `00000000-0000-0000-0000-000000000000` as
+> its `pass_id`, so a consumer treating it like a real pass event tries to
+> process a pass that does not exist — a foreign-key violation on upsert, say.
+> And because every test event hashes to the same Kafka partition, a consumer
+> stuck on one blocks that partition and delays real pass events, not just test
+> traffic.
 
 ### Operations
 

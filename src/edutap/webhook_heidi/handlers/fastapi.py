@@ -85,8 +85,8 @@ async def _read_body_limited(request: Request, limit: int) -> bytes:
     status_code=204,
     responses={
         200: {
-            "description": "Konnektivitätstest (`webhook.test`) angenommen, "
-            "nicht enqueued."
+            "description": "Konnektivitätstest (`webhook.test`) angenommen "
+            "und enqueued."
         },
         204: {"description": "Event erfolgreich enqueued."},
         400: {
@@ -185,15 +185,6 @@ async def handle_pass_event(request: Request) -> Response:
         pass_id=event.data.pass_id,
     )
 
-    if event.type == WEBHOOK_TEST:
-        logger.debug(
-            "connectivity test accepted, deliberately not enqueued",
-            event_id=event.id,
-            event_type=WEBHOOK_TEST,
-            status=200,
-        )
-        return Response(status_code=200)
-
     # Bewusst VOR dem try-Block: ein Modellfehler hier wäre ein eigener Bug
     # (nicht ein Backend-/Infrastrukturproblem) und soll deshalb nicht vom
     # breiten except unten fälschlich als 503 maskiert werden.
@@ -221,5 +212,25 @@ async def handle_pass_event(request: Request) -> Response:
         logger.exception("enqueue failed", event_id=event.id)
         raise HTTPException(status_code=503, detail="Queue unavailable.") from exc
 
-    logger.debug("event enqueued", event_id=event.id, status=204)
-    return Response(status_code=204)
+    # Der Statuscode ist die einzige Stelle, an der im Access-Log ohne
+    # Body-Zugriff erkennbar ist, dass es ein Testklick aus der Admin-UI war
+    # und kein Produktionsverkehr. Beides ist 2xx, der Sender wertet also
+    # beides als Erfolg — die Unterscheidung kostet nichts und ist beim
+    # Debuggen wertvoll. Gewählt wird sie erst hier, NACH dem bestätigten
+    # Enqueue: ein Konnektivitätstest, der grün meldet, während der Broker
+    # weg ist, wäre schlimmer als kein Test.
+    status = 200 if event.type == WEBHOOK_TEST else 204
+
+    # Bewusst INFO, nicht DEBUG: Bei produktionsüblichem INFO-Level gab es
+    # für ein ERFOLGREICH verarbeitetes Event sonst keinerlei Logzeile —
+    # sichtbar war nur der Statuscode im Access-Log der ASGI-Schicht, was ein
+    # korrekt verarbeitetes Event von einem still verschluckten
+    # ununterscheidbar macht. event_type gehört dazu, damit ein Testevent
+    # auch ohne Access-Log erkennbar ist.
+    logger.info(
+        "event enqueued",
+        event_id=event.id,
+        event_type=event.type,
+        status=status,
+    )
+    return Response(status_code=status)

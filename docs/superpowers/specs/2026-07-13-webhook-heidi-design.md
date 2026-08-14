@@ -337,12 +337,12 @@ flowchart TD
     C -- nein --> C1["401"]
     C -- ja --> D{"Envelope parsebar?<br/>id / type / data"}
     D -- nein --> D1["400"]
-    D -- ja --> E{"type == webhook.test?"}
-    E -- ja --> E1["200<br/>(kein enqueue)"]
-    E -- nein --> F["QueueMessage bauen"]
+    D -- ja --> F["QueueMessage bauen"]
     F --> G{"enqueue() bestätigt?<br/>Kafka acks=all"}
     G -- nein --> G1["503"]
-    G -- ja --> G2["204"]
+    G -- ja --> H{"type == webhook.test?"}
+    H -- ja --> H1["200"]
+    H -- nein --> H2["204"]
 
     C1 -.-> R["Sender wiederholt:<br/>12× über 48 h"]
     D1 -.-> R
@@ -366,15 +366,21 @@ antworten, wäre ein verlorener Produce-Call ein endgültig verlorenes Event —
 Sender wiederholt ja nur bei Non-2xx. Das Zeitbudget (30 s) reicht dafür
 komfortabel; `enqueue_timeout` liegt mit 10 s klar darunter.
 
+> **Geändert am 2026-08-14:** Der ursprünglich hier beschriebene Sonderzweig
+> „`webhook.test` → 200, kein Enqueue" entfällt. Der Testevent durchläuft
+> denselben Pfad wie jedes andere Event; 200 bleibt nur als Marker und wird
+> erst nach dem bestätigten Enqueue gesetzt. Begründung und Consumer-Vertrag:
+> [`2026-08-14-webhook-test-enqueue-design.md`](2026-08-14-webhook-test-enqueue-design.md).
+
 ### 5.2 Fehlerbehandlung
 
 | Situation | Antwort | Begründung |
 |---|---|---|
 | Signatur gültig, enqueued | `204` | Body wird nie gelesen |
-| `webhook.test` | `200` | angenommen, nicht enqueued |
+| `webhook.test`, enqueued | `200` | enqueued wie jedes Event; 200 bleibt der Marker (siehe [2026-08-14](2026-08-14-webhook-test-enqueue-design.md)) |
 | Signatur fehlt / falsch / außerhalb Toleranz | `401` | Sender retryt; deckt Secret-Rotation ab |
 | Envelope strukturell kaputt | `400` | Signatur war gültig → Bug beim Sender |
-| Queue nicht erreichbar, Enqueue-Timeout | `503` | Retry ist korrekt; nichts verloren |
+| Queue nicht erreichbar, Enqueue-Timeout | `503` | Retry ist korrekt; nichts verloren — gilt auch für `webhook.test` |
 
 ### 5.3 Secret-Rotation
 
@@ -399,6 +405,12 @@ Offsets, Consumer-Group und Commit-Strategie bleiben in `queues/kafka.py`. Damit
 ist das Backend auch für den Consumer austauschbar — sonst wäre er trotz
 Abstraktion an aiokafka gebunden.
 
+`handle(message)` muss Nachrichten mit `message.action == "webhook.test"`
+verwerfen, statt sie wie ein echtes Pass-Event zu verarbeiten — Details und
+Begründung siehe
+[2026-08-14-webhook-test-enqueue-design.md](2026-08-14-webhook-test-enqueue-design.md)
+§2/§3.3.
+
 ## 7. Tests
 
 Hauskonvention ist `fastapi.testclient.TestClient` (nicht httpx-AsyncClient),
@@ -417,7 +429,10 @@ Die Fälle, die zählen:
 - Timestamp 301 s alt bzw. 301 s in der Zukunft → 401.
 - Unbekannter `type`, unbekannter `reason`, `error.category == ""` → 204
   (kein Fehler!).
-- `webhook.test` → 200, Queue bleibt leer.
+- `webhook.test` → 200 **und** Nachricht liegt in der Queue (`action ==
+  "webhook.test"`); bei kaputter Queue 503 statt 200. Geändert am
+  2026-08-14, siehe
+  [`2026-08-14-webhook-test-enqueue-design.md`](2026-08-14-webhook-test-enqueue-design.md).
 - `enqueue()` wirft → 503.
 - Kafka-Backend: Partition-Key ist `passid`; Roundtrip enqueue → consume → ack.
 

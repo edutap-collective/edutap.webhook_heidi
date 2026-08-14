@@ -23,8 +23,10 @@ All notable changes to this project are documented here.
   this the whole successful path logged a single line and the `webhook.test` path
   logged nothing at all — which made the first commissioning test look like a lost
   event: the sender saw its 200 while the queue and the log stayed empty, exactly as
-  designed and with nothing anywhere saying so. That case now says it in as many words:
-  `connectivity test accepted, deliberately not enqueued`.
+  designed and with nothing anywhere saying so. The `webhook.test` path no longer
+  ends early at all (see the fix below); it takes the same stations as every other
+  event, and the closing `event enqueued` line carries `event_type` so a test click
+  stays recognisable.
 
   **`person_id` is not logged, at any level.** At a university it resolves to a human
   being — at the LMU it is the student number — and DEBUG logging is precisely where
@@ -101,7 +103,8 @@ All notable changes to this project are documented here.
   body bytes, then parses loosely into `WebhookEvent` and writes to the configured
   queue. Status codes are contract, not taste — heidi.cloud retries every non-2xx up
   to 12 times over 48 h: 204 on a successful enqueue, 200 for `webhook.test`
-  (accepted but not enqueued), 401 only for an invalid or missing signature, 400 only
+  (enqueued as well; the 200 is only a marker in the access log and is set after the
+  confirmed enqueue), 401 only for an invalid or missing signature, 400 only
   when there is structurally no envelope, 503 when the queue is unreachable. Unknown
   `type` values are passed through and end in a 204.
 - `Settings.max_body_bytes` (default 1 MiB): an upper bound on the raw request body,
@@ -110,7 +113,7 @@ All notable changes to this project are documented here.
   `handlers/fastapi.py`): 401 as `warning` (without body or signature value, with a
   hint about a possible secret rotation), 400 as `info` with the reason, 413 as
   `warning` with the size, 503 as `error` with `event.id`, a successful enqueue as
-  `debug` with `event.id`.
+  `info` with `event_id`, `event_type` and `status`.
 - OpenAPI documentation of the status codes (`responses={...}` on `@router.post`) for
   200/204/400/401/413/503.
 - `README.md`: a new "Usage" section for consumers (LMU's `lmu_edutap_full_view`) —
@@ -143,6 +146,29 @@ All notable changes to this project are documented here.
   `0.0.0.dev0` fallback of the `Dockerfile`.
 
 ### Fixes
+
+- **The connectivity test only exercised half the chain.** `webhook.test` returned 200
+  before the enqueue path was ever reached, so a "send test" click in the heidi.cloud
+  admin UI proved the network path, TLS termination, routing and the signature — and
+  said nothing whatsoever about the state of the Kafka broker, which is the one
+  question you want answered when you click that button. `webhook.test` now takes the
+  same path as every other event and is enqueued. The 200 is kept as a marker (the only
+  place a test click is distinguishable from production traffic in an access log
+  without reading the body) but is set **after** the confirmed enqueue, so an
+  unreachable queue answers 503 for the test event too — a connectivity test reporting
+  green while the broker is gone is worse than no test at all.
+
+  **Open precondition, outside this package:** the consumer has to discard messages
+  carrying `action == "webhook.test"`. This is **not** implemented in the LMU spooler
+  as of 2026-08-14 (verified against its source: `webhook.test` is listed in
+  `_KNOWN_ACTIONS`, `to_row()` deliberately processes every action, and `_process`
+  upserts unconditionally). Until that filter lands, every admin-UI test click produces
+  a DLQ entry plus an error log, because `person_uid = "test"` violates a NOT NULL
+  foreign key. This change must not be deployed before the consumer-side fix. And
+  because every test event hashes to the same partition — one it shares with real
+  passes — a consumer that gets stuck on one blocks that partition, delaying genuine
+  pass events rather than merely test traffic. See
+  `docs/superpowers/specs/2026-08-14-webhook-test-enqueue-design.md`.
 
 - **The `[observability]` extra narrowed the package's own Python support window.**
   `edutap.observability_settings`, and `edutap.data_models` under it, require Python
