@@ -1,5 +1,12 @@
 # edutap.webhook_heidi Implementation Plan
 
+> ⚠️ **Teilweise überholt.** Dieser Plan zeigt noch den frühen Rücksprung bei
+> `webhook.test` (200, kein Enqueue) sowie den inzwischen entfernten Test
+> `test_webhook_test_is_accepted_but_not_enqueued`. Beides wurde am
+> 2026-08-14 geändert — siehe
+> [`docs/superpowers/specs/2026-08-14-webhook-test-enqueue-design.md`](../specs/2026-08-14-webhook-test-enqueue-design.md).
+> Der Rest des Plans (Architektur, Tasks, Hauskonventionen) bleibt gültig.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Einen FastAPI-Endpoint bauen, der die signierten Pass-Events von `heidi.cloud` entgegennimmt, verifiziert und in eine Kafka-Queue schreibt — plus die Consumer-Seite, mit der ein Spooler die Queue liest.

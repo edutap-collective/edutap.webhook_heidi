@@ -13,8 +13,12 @@ from typing import Any
 
 
 WEBHOOK_TEST = "webhook.test"
-"""Konnektivitätstest aus der heidi.cloud-Admin-UI. Wird angenommen, aber nicht
-in die Queue geschrieben (Null-UUID als pass_id)."""
+"""Konnektivitätstest aus der heidi.cloud-Admin-UI (Null-UUID als ``pass_id``).
+
+Durchläuft denselben Pfad wie jedes andere Event und wird enqueued; der
+Statuscode 200 bleibt nur als Marker erhalten, damit ein Testklick im
+Access-Log erkennbar ist. Das Verwerfen dieser Nachrichten ist Aufgabe des
+Consumers — dieses Paket kann es nicht erzwingen."""
 
 
 class WebhookEventData(BaseModel):
