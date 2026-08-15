@@ -106,9 +106,7 @@ def test_webhook_test_is_enqueued_and_returns_200(client, memory_backend):
 Bisher ist 503 nur für normale Events abgedeckt. Ein Konnektivitätstest, der grün meldet, während der Broker weg ist, ist schlimmer als kein Test. Direkt hinter den Test aus Step 3 einfügen:
 
 ```python
-def test_webhook_test_yields_503_when_queue_unavailable(
-    client, failing_queue_backend
-):
+def test_webhook_test_yields_503_when_queue_unavailable(client, failing_queue_backend):
     """Auch der Testevent darf bei kaputter Queue kein 2xx bekommen — sonst
     meldet die Admin-UI den Konnektivitätstest als erfolgreich, obwohl der
     Broker weg ist. 503 ist hier korrekt und gewollt: Die UI zeigt den Test
@@ -134,9 +132,8 @@ Wenn stattdessen `NameError: name 'TEST_EVENT' is not defined` erscheint, wurde 
 In `src/edutap/webhook_heidi/handlers/fastapi.py` diese drei Zeilen (aktuell `:168-170`) ersatzlos löschen:
 
 ```python
-    if event.type == WEBHOOK_TEST:
-        return Response(status_code=200)
-
+if event.type == WEBHOOK_TEST:
+    return Response(status_code=200)
 ```
 
 Damit gelten `QueueMessage.from_event()` und der `try`-Block für jedes Event. Anschließend die Rückgabe am Ende der Funktion (aktuell `:192`) ersetzen:
@@ -290,15 +287,13 @@ Expected: FAIL mit `assert 0 == 1` bei `len(records) == 1` — auf INFO-Level er
 `src/edutap/webhook_heidi/handlers/fastapi.py` — die `logger.debug`-Zeile (nach Task 1 die vorletzte Anweisung der Funktion) ersetzen:
 
 ```python
-    # Bewusst INFO, nicht DEBUG: Bei produktionsueblichem INFO-Level gab es
-    # fuer ein ERFOLGREICH verarbeitetes Event sonst keinerlei Logzeile —
-    # sichtbar war nur der Statuscode im Access-Log der ASGI-Schicht, was ein
-    # korrekt verarbeitetes Event von einem still verschluckten
-    # ununterscheidbar macht. event.type gehoert dazu, damit ein Testevent
-    # auch ohne Access-Log erkennbar ist.
-    logger.info(
-        "Event enqueued (event.id=%s, event.type=%s).", event.id, event.type
-    )
+# Bewusst INFO, nicht DEBUG: Bei produktionsueblichem INFO-Level gab es
+# fuer ein ERFOLGREICH verarbeitetes Event sonst keinerlei Logzeile —
+# sichtbar war nur der Statuscode im Access-Log der ASGI-Schicht, was ein
+# korrekt verarbeitetes Event von einem still verschluckten
+# ununterscheidbar macht. event.type gehoert dazu, damit ein Testevent
+# auch ohne Access-Log erkennbar ist.
+logger.info("Event enqueued (event.id=%s, event.type=%s).", event.id, event.type)
 ```
 
 Nur `event.id` und `event.type` — keine Feldwerte aus `data` (PII: bei LMU steckt die Matrikelnummer in `person_id`).
