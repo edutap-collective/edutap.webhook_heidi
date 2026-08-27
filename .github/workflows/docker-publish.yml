@@ -6,10 +6,15 @@ name: Publish container image
 # The image name follows the repository name (`github.repository`), so a
 # repository rename carries the image with it and no name is duplicated here.
 #
-# Why this file exists at all: the package is primarily a library, and
-# `release.yaml` publishes it to PyPI. The standalone deployment shape needs an
-# image as well — a deployment that pulls
-# ghcr.io/<owner>/edutap.webhook_heidi:latest has nothing to pull without it.
+# This is how the project is distributed. It is a service, not a library: the
+# image is the artifact, and there is no PyPI package.
+#
+# An earlier version of this comment claimed the opposite -- that the package
+# was primarily a library published to PyPI, with the image merely an
+# addition. That was never true: nothing of this name was ever published to
+# pypi.org or test.pypi.org, and the release workflow that made the claim
+# failed on every run for weeks without anyone missing its output.
+#
 # The sibling services (edutap.data_provider, edutap.pass_builder) carry the
 # same workflow; keep the three in step.
 
