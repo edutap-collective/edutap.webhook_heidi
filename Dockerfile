@@ -5,7 +5,27 @@
 # The image serves the standalone deployment shape (src/.../standalone.py). A
 # consumer that embeds the router instead builds its own image and does not use
 # this file.
-FROM python:3.14-slim AS build
+# ONE PLACE FOR THE PYTHON VERSION. Both stages and the copied path below are
+# derived from this argument, because they have to agree: `pip install` puts the
+# package under the interpreter's own directory, and the runtime stage copies
+# from exactly there.
+#
+# Keeping them in three separate literals is what broke the build on 2026-09-13:
+# Renovate raised both `FROM python:3.13-slim` lines to 3.14 -- correctly, that
+# is its job -- while the hard-coded `/usr/local/lib/python3.13/site-packages`
+# in the COPY stayed behind. The build then failed with
+#
+#   failed to compute cache key: "/usr/local/lib/python3.13/site-packages": not found
+#
+# and it failed only at the next build, not at the merge. The comment that used
+# to sit above that COPY said "changing the base image tag means changing this
+# path" -- a note asking a human to remember something a machine had just
+# changed. This argument removes the need to remember.
+#
+# renovate: datasource=docker depName=python versioning=docker
+ARG PYTHON_VERSION=3.14
+
+FROM python:${PYTHON_VERSION}-slim AS build
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -26,11 +46,13 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
 # JSON lines and the spans their trace ids.
 RUN pip install --no-cache-dir ".[kafka,observability]" uvicorn
 
-FROM python:3.14-slim
-# The interpreter of the base image is 3.13, so this is where `pip install` put
-# the package in the build stage. Changing the base image tag means changing
-# this path.
-COPY --from=build /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+FROM python:${PYTHON_VERSION}-slim
+# An ARG declared before the first FROM is outside every build stage; naming it
+# again here brings it into this one. Without this line the substitution below
+# would silently expand to an empty string, and the COPY would look for
+# /usr/local/lib/python/site-packages.
+ARG PYTHON_VERSION
+COPY --from=build /usr/local/lib/python${PYTHON_VERSION}/site-packages /usr/local/lib/python${PYTHON_VERSION}/site-packages
 COPY --from=build /usr/local/bin /usr/local/bin
 RUN useradd --create-home --uid 10001 app
 WORKDIR /app
