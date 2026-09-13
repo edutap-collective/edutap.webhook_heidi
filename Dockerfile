@@ -5,7 +5,7 @@
 # The image serves the standalone deployment shape (src/.../standalone.py). A
 # consumer that embeds the router instead builds its own image and does not use
 # this file.
-FROM python:3.13-slim AS build
+FROM python:3.14-slim AS build
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -26,7 +26,7 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
 # JSON lines and the spans their trace ids.
 RUN pip install --no-cache-dir ".[kafka,observability]" uvicorn
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 # The interpreter of the base image is 3.13, so this is where `pip install` put
 # the package in the build stage. Changing the base image tag means changing
 # this path.
